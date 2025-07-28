@@ -5,6 +5,9 @@
 *.pth
 *.json
 
+#scripts
+*.sh
+
 # Jupyter Notebook
 .ipynb_checkpoints
 

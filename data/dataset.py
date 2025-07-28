@@ -14,7 +14,7 @@ import torch
 from torch.utils.data import Dataset
 from PIL import Image, ImageFile
 
-from data.transforms import resample_features
+from transforms import resample_features
 
 COLUMNS_TO_KEEP = {
     'face': [
