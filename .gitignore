@@ -1,8 +1,9 @@
 # data
-.csv
-.npy
-.pth
-.json
+*.csv
+*.txt
+*.npy
+*.pth
+*.json
 
 # Jupyter Notebook
 .ipynb_checkpoints

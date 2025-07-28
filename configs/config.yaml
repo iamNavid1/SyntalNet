@@ -1,0 +1,29 @@
+model:
+  name: CohereNet
+  hidden_dims: [256, 128]
+  num_classes: 10
+
+dataset:
+  root_dir: "./data"
+  modalities:
+    - face
+    - pose
+  window:
+    length_seconds: 19
+    stride_seconds: 3
+  transforms: null              # Optional transform pipeline (defined in data/transforms.py)
+
+training:
+  epochs: 100
+  batch_size: 32
+  num_workers: 4
+  num_epochs: 50
+  learning_rate: 0.001
+  weight_decay: 1e-5
+  optimizer: "adam"
+
+logging:
+  log_dir: "./logs"
+  checkpoint_dir: "./checkpoints"
+  save_interval: 5
+
