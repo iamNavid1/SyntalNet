@@ -35,3 +35,6 @@ venv.bak/
 .cursorignore
 .cursorindexingignore
 
+# Python
+__pycache__/
+
