@@ -1,13 +1,14 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
 from torch.nn.modules.utils import _pair
 from typing import List, Tuple, Sequence, Union, Optional, Dict
 
-import utils
+from . import utils as mutils
 from base_model import BaseModel
-from partial import PartialConv2d
 from squeeze_excite import CrossSE
+from partial import PartialConv2d, PartialAvgPool2d
 from fusion import GPSFusion, GLRFusion
 
 
@@ -22,12 +23,13 @@ class CNNBackbone(nn.Module):
             dilation: int | Tuple[int, int] = 1,
             p_drop: float = 0.05,
             activation: str = "silu",
-            residual: bool = True,
             cross_se: bool = True,
+            residual: bool = True,
+            mask_aware_skip: bool = True,
     ):
         super().__init__()
 
-        self.prenorm = utils.ChannelLayerNorm2d(in_channels)
+        self.prenorm = mutils.ChannelLayerNorm2d(in_channels)
         self.act0 = nn.SiLU(inplace=True) if activation == "silu" else nn.GELU()
         self.conv = PartialConv2d(
             in_channels  = in_channels,
@@ -42,23 +44,96 @@ class CNNBackbone(nn.Module):
         self.skip = None
         self.mp_fusion = None  # multi-person channel fusion
 
-        if residual:
-            preserves = utils._preserves_spatial(kernel_size, stride, padding, dilation)
-            if not preserves:
-                self.skip = nn.Sequential(
-                    nn.AvgPool2d(stride, stride, ceil_mode=utils._is_same_like(kernel_size, stride, padding, dilation)),
-                    nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, bias=False)
-                )
-            elif in_channels != out_channels:
-                self.skip = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, bias=False)
-            else:
-                self.skip = nn.Identity()
-
         if cross_se:
             self.mp_fusion = CrossSE(
                 num_channels    = out_channels,
                 reduction_ratio = 8, 
             )
+
+        self.mask_aware_skip = mask_aware_skip
+        self._skip_mode, self.skip = self._make_residual(
+            residual=residual,
+            mask_aware_skip=mask_aware_skip,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+        )
+
+    @staticmethod
+    def _make_residual(*, residual: bool, mask_aware_skip: bool, in_channels: int, out_channels: int,
+        kernel_size: int | Tuple[int, int], stride: int | Tuple[int, int],
+        padding: int | Tuple[int, int], dilation: int | Tuple[int, int],
+    ) -> Tuple[str, Optional[nn.Module]]:
+        
+        if not residual:
+            return None, None
+
+        stride = _pair(stride)
+        preserves = mutils._preserves_spatial(kernel_size, stride, padding, dilation)
+        need_mask_update = (stride != (1, 1))
+        ceil = mutils._is_same_like(kernel_size, stride, padding, dilation)
+
+        if mask_aware_skip:
+            # ----- mask-aware skip -----
+            if not preserves:
+                # downsample + 1x1 projection (mask-aware)
+                skip = nn.ModuleList([
+                    PartialAvgPool2d(stride, stride),
+                    PartialConv2d(in_channels, out_channels, kernel_size=1,
+                                  bias=False, return_mask=need_mask_update),
+                ])
+                return "partial_pool_1x1", skip
+
+            if in_channels != out_channels:
+                # 1x1 projection (mask-aware)
+                skip = PartialConv2d(in_channels, out_channels, kernel_size=1,
+                                     bias=False, return_mask=need_mask_update)
+                return "partial_1x1", skip
+
+            # identity (mask-aware path in forward)
+            return "partial_identity", None
+
+        # ----- vanilla skip -----
+        if not preserves:
+            skip = nn.Sequential(
+                nn.AvgPool2d(stride, stride, ceil_mode=ceil),
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False),
+            )
+            return "vanilla_pool_1x1", skip
+
+        if in_channels != out_channels:
+            skip = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
+            return "vanilla_1x1", skip
+
+        return "vanilla_identity", nn.Identity()
+
+    def _residual_forward(self, x: torch.Tensor, m: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._skip_mode in ["vanilla_pool_1x1", "vanilla_1x1", "vanilla_identity"]:
+            return self.skip(x), m
+
+        if self._skip_mode == "partial_identity":
+            m_exp = self._expand_to_channels(m, x.shape[1], x.dtype)
+            return x * m_exp, m
+
+        if self._skip_mode == "partial_pool_1x1":
+            x, m = self.skip[0](x, m)
+            out = self.skip[1](x, m)
+            return out if isinstance(out, tuple) else (out, m)
+        
+        # partial_1x1 skip
+        out = self.skip(x, m)
+        return out if isinstance(out, tuple) else (out, m)
+
+    @staticmethod
+    def _to_shared_mask(m: torch.Tensor, dtype) -> torch.Tensor:
+        return m if m.shape[1] == 1 else (m.sum(dim=1, keepdim=True) > 0).to(dtype)
+
+    @staticmethod
+    def _expand_to_channels(m: torch.Tensor, C: int, dtype) -> torch.Tensor:
+        return m if m.shape[1] == C else m.expand(-1, C, -1, -1).to(dtype)
 
     def forward(
             self, 
@@ -69,11 +144,11 @@ class CNNBackbone(nn.Module):
         # folding P into batch
         B, P, C, T, F = x.shape
         x = x.view(B * P, C, T, F)
-        mask = m.view(B * P, 1, T, F)
+        m = m.view(B * P, 1, T, F)
 
         # apply convolution pipeline
         out = self.act0(self.prenorm(x))
-        out, mask = self.conv(out, mask)
+        out, mask = self.conv(out, m)
         out = self.drop(out)
 
         # apply multi-person channel fusion
@@ -85,9 +160,14 @@ class CNNBackbone(nn.Module):
 
         # apply skip connection
         if self.skip is not None:
-            res = self.skip(x)  # (B*P, C', T', F')
-            res *= mask         # mask-gated residual unit
-            out += res
+            s, m_s = self._residual_forward(x, m)  # (B*P, C', T', F')
+            if self.mask_aware_skip:
+                out += s
+                m_s_shared = self._to_shared_mask(m_s, out.dtype)
+                mask = torch.maximum(m_s_shared, mask)
+            else:
+                s *= mask  # mask-gated residual unit
+                out += s
 
        # back to (B, P, C', T', F')
         out = out.view(B, P, out.shape[-3], out.shape[-2], out.shape[-1])
@@ -163,7 +243,8 @@ class Branch(nn.Module):
                 stride = 3,
                 padding = 1,
                 output_padding = 1,
-                bias=False
+                groups=dim_emb,
+                bias=False,
             )
         else:
             self.emb_upsampler = None
@@ -293,13 +374,29 @@ class CosineProtoClassifier(nn.Module):
     def update_prototypes(self, z: torch.Tensor, y: torch.Tensor):
         if not self.use_prototypes:
             return
-        z = F.normalize(z, dim=-1)
-        for c in range(self.K):
-            idx = (y == c)
-            if idx.any():
-                batch_mean = z[idx].mean(dim=0)
-                self.prototypes[c] = F.normalize(self.m * self.prototypes[c] + (1 - self.m) * batch_mean, dim=0)
-                self.proto_counts[c] += idx.sum()
+        
+        z = F.normalize(z.float(), dim=-1)
+        y = y.long()
+        K, D = self.K, self.D
+
+        # local class sums & counts
+        mask = F.one_hot(y, num_classes=K).to(z.dtype)
+        sums = mask.t().matmul(z)
+        cnts = mask.sum(dim=0)
+
+        # all-reduce to GLOBAL sums/cnts
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(sums, op=dist.ReduceOp.SUM)
+            dist.all_reduce(cnts, op=dist.ReduceOp.SUM)
+
+        # EMA update
+        nz = (cnts > 0)
+        if nz.any():
+            means = sums[nz] / cnts[nz].unsqueeze(1).clamp_min(1e-6)
+            proto = self.prototypes[nz]
+            updated = self.m * proto + (1.0 - self.m) * means
+            self.prototypes[nz] = F.normalize(updated, dim=1).to(self.prototypes.dtype)
+        self.proto_counts += cnts.to(self.proto_counts.dtype)
 
     def forward(self, z: torch.Tensor, epoch: Optional[int] = None) -> torch.Tensor:
         s_lin = torch.exp(self.log_scale_lin).clamp(1., 100.)
@@ -347,8 +444,12 @@ class ClassificationHead(nn.Module):
     ):
         super().__init__()
         self.heads = head_names
-        self.group_wise = group_wise
         self.P = person_per_grp
+        
+        self.group_wise = group_wise
+        if group_wise:
+            dim = dim * person_per_grp
+        
         self.residual = residual
         if residual:
             self.alpha = nn.Parameter(torch.full((dim,), 1e-4))
@@ -363,8 +464,16 @@ class ClassificationHead(nn.Module):
                                                                       warmup_epochs=warmup_epochs)
                                           for name in self.heads})
 
-    def forward(self, z: torch.Tensor, epoch: Optional[int] = None) -> Dict[str, torch.Tensor]:
+    @torch.no_grad()
+    def update_prototypes(self, z_dict: Dict[str, torch.Tensor], y_dict: Dict[str, torch.Tensor]):
+        for name in self.heads:
+            if self.group_wise:
+                B, D = z_dict[name].shape
+                B = B // self.P
+                z_dict[name] = z_dict[name].view(B, self.P, D).reshape(B, self.P * D)
+            self.classifiers[name].update_prototypes(z_dict[name], y_dict[name])
 
+    def forward(self, z: torch.Tensor, epoch: Optional[int] = None) -> Dict[str, torch.Tensor]:
         if self.group_wise:
             B, D = z.shape
             B = B // self.P
@@ -375,30 +484,27 @@ class ClassificationHead(nn.Module):
         if self.residual:
             z_shared = z + self.alpha * z_shared 
 
-        outs = {}
+        z_head: Dict[str, torch.Tensor] = {}
+        logits: Dict[str, torch.Tensor] = {}
         for name in self.heads:
-            out = self.adapters[name](z_shared)
+            z_out = self.adapters[name](z_shared)
             if self.residual:
-                out = z_shared + self.alpha * out
-            outs[name] = self.classifiers[name](out, epoch=epoch)
-        return outs
+                z_out = z_shared + self.alpha * z_out
+            z_head[name] = z_out
+            logits[name] = self.classifiers[name](z_out, epoch=epoch)
 
-    @torch.no_grad()
-    def update_prototypes(self, z: torch.Tensor, y_dict: Dict[str, torch.Tensor]):
-        if self.group_wise:
-            B, D = z.shape
-            B = B // self.P
-            z = z.view(B, self.P, D).reshape(B, self.P * D)
-        for name in self.heads:
-            if name in self.classifiers and y_dict.get(name) is not None:
-                self.classifiers[name].update_prototypes(z, y_dict[name])
+        features: Dict[str, torch.Tensor | Dict[str, torch.Tensor]] = {
+            'shared': z_shared,
+            'per_head': z_head,
+        }
+        return features, logits
 
 
 class SyntalNet(BaseModel):
     def __init__(
             self,
             branches: List[str]         = ['Videokinetic', 'Dialogue', 'Acoustic'],
-            dim_out: int                = 512,
+            dim_out: int                = 256,
             in_ch_emb: List[int]        = [1, 1, 1],
             in_ch_feat: List[int]       = [1, 1, 1],
             dim_emb: List[int]          = [1024, 1024, 512],
@@ -411,7 +517,7 @@ class SyntalNet(BaseModel):
             stride_emb: List[List[int]] = [[2, 2, 2], [2, 2, 2], [1, 2, 2]],
             branch_residual: bool       = True,
             cross_se: bool              = True,
-            prs_cls_heads: Tuple[str]   = (),
+            ind_cls_heads: Tuple[str]   = (),
             grp_cls_heads: Tuple[str]   = (),
             use_prototypes: bool        = True,
             proto_warmup_epochs: int    = 5,
@@ -451,10 +557,10 @@ class SyntalNet(BaseModel):
         self.individual_classifier = None
         self.group_classifier = None
 
-        if prs_cls_heads:
+        if ind_cls_heads:
             self.individual_classifier = ClassificationHead(
                 dim            = dim_out,
-                head_names     = list(prs_cls_heads),
+                head_names     = list(ind_cls_heads),
                 use_prototypes = use_prototypes,
                 residual       = cls_residual,
                 warmup_epochs  = proto_warmup_epochs,
@@ -462,8 +568,10 @@ class SyntalNet(BaseModel):
 
         if grp_cls_heads:
             self.group_classifier = ClassificationHead(
-                dim            = dim_out * len(branches),
+                dim            = dim_out,
                 head_names     = list(grp_cls_heads),
+                trunk_hidden   = dim_out,
+                adapter_hidden = dim_out,
                 use_prototypes = use_prototypes,
                 residual       = cls_residual,
                 warmup_epochs  = proto_warmup_epochs,
@@ -471,8 +579,21 @@ class SyntalNet(BaseModel):
             )
 
     @torch.no_grad()
-    def update_prototypes(self, z: torch.Tensor, y_dict: Dict[str, torch.Tensor]):
-        self.classifier.update_prototypes(z, y_dict)
+    def update_prototypes(
+        self,
+        z_dict: Dict[torch.Tensor | str, Dict[str, torch.Tensor]], 
+        y_dict: Dict[str, Dict[str, torch.Tensor]],
+    ):
+        if self.individual_classifier is not None:
+            z = z_dict["individual"]["per_head"]
+            y = y_dict["individual"]
+            assert y, "No individual logits found in y_dict['individual']"
+            self.individual_classifier.update_prototypes(z, y)
+        if self.group_classifier is not None:
+            z = z_dict["group"]["per_head"]
+            y = y_dict["group"]
+            assert y, "No individual logits found in y_dict['group']"
+            self.group_classifier.update_prototypes(z, y)
 
     def forward(self, batch_data, epoch = None):
 
@@ -483,13 +604,19 @@ class SyntalNet(BaseModel):
 
         z = self.mm_fusion(z_branch)
 
-        logits = {}
+        z_outs: Dict[torch.Tensor | Dict[str, torch.Tensor]] = {}
+        logits: Dict[str, Dict[str, torch.Tensor]] = {}
+        z_outs['backbone'] = z
         if self.individual_classifier:
-            logits.update({'individual': self.individual_classifier(z, epoch)})
+            ind_features, ind_logits = self.individual_classifier(z, epoch)
+            z_outs.update({'individual': ind_features})
+            logits.update({'individual': ind_logits})
         if self.group_classifier:
-            logits.update({'group': self.group_classifier(z, epoch)})
+            grp_features, grp_logits = self.group_classifier(z, epoch)
+            z_outs.update({'group': grp_features})
+            logits.update({'group': grp_logits})
 
-        return z, logits
+        return z_outs, logits
 
 
 

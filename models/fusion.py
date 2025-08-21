@@ -43,7 +43,6 @@ class ResidualPreNorm(nn.Module):
         self.in_ch = in_ch
         self.out_ch = out_ch
         self.gated = gated
-        self.mask_aware_skip = mask_aware_skip
 
         self.ln    = ChannelLayerNorm2d(in_ch)
         self.act   = nn.SiLU(inplace=True)
@@ -51,11 +50,11 @@ class ResidualPreNorm(nn.Module):
         self.drop  = nn.Dropout(p_drop)
 
         self.skip_stride = _pair(skip_stride)
-        if not self.mask_aware_skip:  # vanilla skip
+        if not mask_aware_skip:  # vanilla skip
             self._skip_mode = "vanilla"
             self.skip = (
                 nn.Identity() if (in_ch == out_ch and self.skip_stride == (1,1)) \
-                else nn.Conv2d(self.in_ch, self.out_ch, kernel_size=1, bias=False)
+                else nn.Conv2d(self.in_ch, self.out_ch, kernel_size=1, stride=self.skip_stride, bias=False)
             )
         else:  # mask-aware skip
             self._skip_mode = "partial_identity" if (in_ch == out_ch and self.skip_stride == (1,1)) else "partial_1x1"
@@ -306,14 +305,13 @@ class GLRFusion(nn.Module):
     """
     Gated Low Rank Fusion: modality allocation + low-rank bilinear pairwise fusion.
 
-    Args:
-      dims_mod:  list of input dims [D1, D2, D3] (one per modality)
-      dim_hidden: common hidden dim Dh after per-modality projection
-      rank_pair:  low-rank dimension R for pairwise MLB features
-      alloc_hidden: hidden width of the tiny allocation MLP (per modality, shared weights)
-      dim_out:    output dimension for downstream head
-      eps_floor:  epsilon floor mixed with uniform over modalities
-      p_drop_mod: probability to drop a modality during training (ModDrop); set 0 to disable
+    :param dims_mod:  list of input dims [D1, D2, D3] (one per modality)
+    :param dim_hidden: common hidden dim Dh after per-modality projection
+    :param rank_pair:  low-rank dimension R for pairwise MLB features
+    :param alloc_hidden: hidden width of the tiny allocation MLP (per modality, shared weights)
+    :param dim_out:    output dimension for downstream head
+    :param eps_floor:  epsilon floor mixed with uniform over modalities
+    :param p_drop_mod: probability to drop a modality during training (ModDrop); set 0 to disable
     """
     def __init__(
             self,
@@ -431,3 +429,37 @@ class GLRFusion(nn.Module):
             }
             return out, aux
         return out
+
+
+
+
+
+# def gate_entropy_regularizer(gate_alloc: torch.Tensor, strength: float = 1e-4) -> torch.Tensor:
+#     if strength <= 0:
+#         return torch.zeros((), device=gate_alloc.device, dtype=gate_alloc.dtype)
+#     w = gate_alloc.clamp_min(1e-8)
+#     ent = -(w * w.log()).sum(dim=-1).mean()
+#     return -strength * ent  # negative because ent is positive
+
+# # If some streams are unavailable (or ModDrop masked), compute entropy over only the available entries:
+# def gate_entropy_regularizer_masked(w: torch.Tensor, avail: torch.Tensor | None, strength: float = 1e-4):
+#     if strength <= 0: 
+#         return torch.zeros((), device=w.device, dtype=w.dtype)
+#     if avail is not None:
+#         # renormalize w over available entries only
+#         w = w * (avail > 0).to(w.dtype)
+#         w = w / w.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+#     w = w.clamp_min(1e-8)
+#     ent = -(w * w.log()).sum(dim=-1).mean()
+#     return -strength * ent
+
+# def ent_weight(epoch, warm=0, hold=5, decay=10, max_lambda=1e-4):
+#     if epoch < warm:         return 0.0
+#     if epoch < warm+hold:    return max_lambda
+#     t = min(1.0, (epoch - warm - hold) / max(1, decay))
+#     return max_lambda * 0.5 * (1 + math.cos(math.pi * t))  # cosine to 0
+
+# λm = ent_weight(epoch, hold=5, decay=5, max_lambda=1e-4)
+# loss += gate_entropy_regularizer(aux_mod['gate_alloc'], λm)
+# λM = ent_weight(epoch, hold=5, decay=5, max_lambda=2e-4)
+# loss += gate_entropy_regularizer_masked(aux_mm['alloc'], avail, λM)

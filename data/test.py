@@ -42,35 +42,63 @@ def main():
         now = time.time()
         print(f"\nBatch {batch_idx+1} ready in {now-prev_time:.3f}s:", flush=True)
         prev_time = now
-        for mod, (data_tensor, mask_tensor) in batch_data.items():
-            print(
-                f"  Modality '{mod}': data shape {tuple(data_tensor.shape)},",
-                f"mask shape {tuple(mask_tensor.shape)}"
-            )
+        # for mod, (data_tensor, mask_tensor) in batch_data.items():
+        #     print(
+        #         f"  Modality '{mod}': data shape {tuple(data_tensor.shape)},",
+        #         f"mask shape {tuple(mask_tensor.shape)}"
+        #     )
         indiv = batch_labels['individual']
         group = batch_labels['group']
+        # print(f"  Individual labels shape: {tuple(indiv.shape)}")
+        # print(f"  Group labels shape: {tuple(group.shape)}")
+        
+
+        # Check for -1 values in labels
+        indiv_has_neg_one = torch.any(indiv == -1)
+        group_has_neg_one = torch.any(group == -1)
+        
         print(f"  Individual labels shape: {tuple(indiv.shape)}")
+        if indiv_has_neg_one:
+            print(f"  WARNING: Individual labels contain {torch.sum(indiv == -1)} occurance of -1")
+        
         print(f"  Group labels shape: {tuple(group.shape)}")
+        if group_has_neg_one:
+            print(f"  WARNING: Individual labels contain {torch.sum(group == -1)} occurance of -1")
+        
 
         # if batch_idx >= 2:
         # break
 
 
-    # # Jump to the 25th batch
+
+
+
+    # # Jump to the XXth batch
     # from itertools import islice
-    # batch_tuple = next(islice(loader, 24, None))
+    # jump_to = 37
+    # batch_tuple = next(islice(loader, jump_to, None))
     # batch_data, batch_labels = batch_tuple
 
-    # print(f"\nBatch 25:")
-    # for mod, (data_tensor, mask_tensor) in batch_data.items():
-    #     print(
-    #         f"  Modality '{mod}': data shape {tuple(data_tensor.shape)},",
-    #         f"mask shape {tuple(mask_tensor.shape)}"
-    #     )
+    # print(f"\nBatch {jump_to}:")
+    # # for mod, (data_tensor, mask_tensor) in batch_data.items():
+    # #     print(
+    # #         f"  Modality '{mod}': data shape {tuple(data_tensor.shape)},",
+    # #         f"mask shape {tuple(mask_tensor.shape)}"
+    # #     )
     # indiv = batch_labels['individual']
     # group = batch_labels['group']
+
+    # indiv_has_neg_one = torch.any(indiv == -1)
+    # group_has_neg_one = torch.any(group == -1)
+
     # print(f"  Individual labels shape: {tuple(indiv.shape)}")
+    # if indiv_has_neg_one:
+    #     print(f"  WARNING: Individual labels contain {torch.sum(indiv == -1)} occurance of -1")
+
     # print(f"  Group labels shape: {tuple(group.shape)}")
+    # if group_has_neg_one:
+    #     print(f"  WARNING: Individual labels contain {torch.sum(group == -1)} occurance of -1")
+
 
 
 

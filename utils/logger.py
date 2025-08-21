@@ -1,17 +1,21 @@
+from __future__ import annotations
+
 import os
 import logging
+from typing import Tuple
 from torch.utils.tensorboard import SummaryWriter
 
 
-def setup_logger(log_dir):
+def setup_logger(log_dir: str) -> Tuple[logging.Logger, SummaryWriter]:
+
     os.makedirs(log_dir, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s %(levelname)s %(message)s',
+        format="%(asctime)s %(levelname)s %(message)s",
         handlers=[
-            logging.FileHandler(os.path.join(log_dir, 'run.log')),
-            logging.StreamHandler()
-        ]
+            logging.FileHandler(os.path.join(log_dir, "run.log")),
+            logging.StreamHandler(),
+        ],
     )
     writer = SummaryWriter(log_dir)
-    return logging.getLogger(), writer
+    return logging.getLogger(__name__), writer

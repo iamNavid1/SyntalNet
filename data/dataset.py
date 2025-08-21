@@ -49,12 +49,14 @@ class GroupDynamicsDataset(Dataset):
     """
     def __init__(
         self,
-        root_dir,
-        modalities,
-        snippet_length = 10,    # sec
-        stride = 3,          # sec
-        resample_freq = 10,  # hz
-        transforms=None
+        root_dir:       str,
+        modalities:     List[str],
+        snippet_length: int                 = 10,  # sec
+        stride:         int                 = 3,   # sec
+        resample_freq:  int                 = 10,  # hz
+        transforms:     Optional[Any]       = None,
+        include_groups: Optional[List[int]] = None,
+        exclude_groups: Optional[List[int]] = None,
     ):
         self.root_dir = root_dir
         self.modalities = modalities
@@ -81,6 +83,11 @@ class GroupDynamicsDataset(Dataset):
             if match:
                 group_ids.add(int(match.group(1)))
         self.group_ids = sorted(group_ids)
+
+        if include_groups is not None:
+            self.group_ids = [g for g in self.group_ids if g in include_groups]
+        if exclude_groups is not None:
+            self.group_ids = [g for g in self.group_ids if g not in exclude_groups]
 
         # Prepare samples: list of dicts
         self.samples = []  # each entry: { 'group': int, 'start_time': float }
@@ -410,7 +417,7 @@ class GroupDynamicsDataset(Dataset):
 
         labels = {}
 
-        # Individual label evolution (Q4, Q5)
+        # Individual label (Q4, Q5)
         individual_lables = np.full((3, 2), -1, dtype=np.int64)  # default -1 for missing
         if not row_i.empty and not row_j.empty:
             for p_idx, person in enumerate(COLUMNS_TO_KEEP['individual_labels']):
@@ -424,8 +431,10 @@ class GroupDynamicsDataset(Dataset):
                     else:  # value_j > value_i
                         individual_lables[p_idx, l_idx] = 2  # Increasing
         # else: already filled with -1
+        else:
+            print(f"Missing individual label for group {gid}: row_i empty={row_i.empty}, row_j empty={row_j.empty}, video_name_i={video_name_i}, video_name_j={video_name_j}")
 
-        # Group label evolution (Q1, Q2, Q3)
+        # Group label (Q1, Q2, Q3)
         group_labels = np.full(3, -1, dtype=np.int64)
         if not row_i.empty and not row_j.empty:
             for l_idx, label in enumerate(COLUMNS_TO_KEEP['group_labels']):
@@ -438,6 +447,8 @@ class GroupDynamicsDataset(Dataset):
                 else:
                     group_labels[l_idx] = 2  # Increasing
         # else: already filled with -1
+        else:
+            print(f"Missing group label for group {gid}: row_i empty={row_i.empty}, row_j empty={row_j.empty}, video_name_i={video_name_i}, video_name_j={video_name_j}")
 
         labels['individual'] = torch.tensor(individual_lables, dtype=torch.long)
         labels['group'] = torch.tensor(group_labels, dtype=torch.long)
