@@ -11,8 +11,8 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from utils.losses import BaseLoss, ClassBalancedFocalLoss
-from engine.utils import BuildAutocastKWargs
-from validator import Validator
+from .utils import BuildAutocastKWargs
+from .validator import Validator
 
 
 class Trainer:

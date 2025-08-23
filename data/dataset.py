@@ -1,11 +1,7 @@
 import os
 import glob
-import random
-import copy
 import json
 import re
-import warnings
-from pathlib import Path
 from collections import OrderedDict
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
@@ -23,9 +19,9 @@ COLUMNS_TO_KEEP = {
         *[f"{coord}_{i}" for coord in ['X', 'Y', 'Z'] for i in range(68)]
     ],
     'turns': [
-        'Turn Position', 'Turn Duration', 'Pause Before',
-        'Speaker Change?', 'Has Overlap?', 'Is Floor-taking?',
-        'Is Butting-in?', 'Is Backchannel?'
+        'Turn Position', 'Turn Duration', 'Cumulative Turn Duration', 'Pause Before',
+        'Speaker Change?', 'Has Overlap?', 'Is Floor-taking?', 'Is Butting-in?', 'Is Backchannel?',
+        'Cumulative Floor-taking', 'Cumulative Butting-in', 'Cumulative Backchannel'
     ],
     'prosody': [
         'pitch_Hz','hnr_dB', 'mfcc_1', 'energy_dB', 
@@ -180,7 +176,7 @@ class GroupDynamicsDataset(Dataset):
                 json_path = os.path.join(folder, f"Group_{gid:02}.json")
                 frames = self._load_json(json_path)
 
-                num_joints = 32
+                num_joints = 26
                 all_feat = []
                 all_mask = []
                 for pid in range(3):
@@ -235,7 +231,9 @@ class GroupDynamicsDataset(Dataset):
                     npy_i_path = os.path.join(folder, f"Group{gid:02}_Person{pid}_Clip{clip_i+1}.npy")
                     arr = self._load_npy(npy_i_path)
                     feat_tensor = torch.tensor(arr, dtype=torch.float)
-                    mask_tensor = torch.ones_like(feat_tensor, dtype=torch.bool)
+                    # expected shape of the video features post temporal upsampling
+                    expected_len = (2 * self.snippet_length - self.len_overlap) * self.resample_freq
+                    mask_tensor = torch.ones([expected_len, feat_tensor.shape[1]], dtype=torch.bool)
                     all_feat.append(feat_tensor)
                     all_mask.append(mask_tensor)
                 # shape: (num_person, 57, ...)

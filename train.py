@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import os
+import yaml
 import glob
 import json
 import random
@@ -17,11 +18,13 @@ from torch.utils.data import DataLoader, DistributedSampler
 
 from data.dataset import GroupDynamicsDataset
 from data.collate import collate_fn
+from data.transforms import StandardizeTransform
 from engine.trainer import Trainer
 from models.builder import build_model, load_config
 from utils.logger import setup_logger
 from utils.scheduler import build_scheduler
 from utils.optimizer import build_optimizer
+from utils.model_stats import *
 
 
 # ----------------------------- arg parsing -----------------------------
@@ -127,6 +130,15 @@ def build_datasets(cfg, logo_held_out=None):
     train_cfg = {**args}
     val_cfg   = {**args}
 
+    norm_stats = cfg["dataset"].get("stats_dir")
+    if isinstance(norm_stats, str):
+        with open(norm_stats, "r") as f:
+            norm_stats = yaml.safe_load(f)
+    if norm_stats:
+        transform = StandardizeTransform(norm_stats)
+        train_cfg["transforms"] = transform
+        val_cfg["transforms"] = transform
+
     if logo_held_out is not None:
         train_cfg["exclude_groups"] = [logo_held_out]
         val_cfg["include_groups"] = [logo_held_out]
@@ -198,14 +210,20 @@ def run_training(cfg, args, device, local_rank, distributed, logger, writer):
     train_loader, val_loader = build_loaders(cfg, train_dataset, val_dataset, distributed)
 
     model = build_model(cfg).to(device)
-    if distributed and device.type == "cuda":
+
+    if is_main_process() and logger:
+        log_training_hyperparams(cfg, logger)
+        log_model_hyperparams(cfg, logger)
+        log_param_counts(model, logger)
+    
+    if distributed:
+        if device.type != "cuda":
+            raise RuntimeError("CPU distributed not supported; use CUDA or run single-process.")
         model = torch.nn.parallel.DistributedDataParallel(
             model,
             device_ids=[local_rank],
             output_device=local_rank,
         )
-    else:
-        raise RuntimeError("CPU distributed not supported; use CUDA or run single-process.")
 
     optimizer = build_optimizer(model, cfg)
 
@@ -242,8 +260,8 @@ def run_training(cfg, args, device, local_rank, distributed, logger, writer):
             trainer.resume_from(resume_path)
 
     trainer.train(
-        num_epochs=cfg["training"]["epochs"],
-        checkpoint_dir=ckpt_dir,
+        epochs=cfg["training"]["epochs"],
+        ckpt_dir=ckpt_dir,
         validate_interval=cfg["training"].get("val_interval", 1),
     )
 
@@ -336,14 +354,20 @@ def run_logo_cv(cfg, args, device, local_rank, distributed, base_logger, base_wr
         train_loader, val_loader = build_loaders(cfg, train_dataset, val_dataset, distributed)
 
         model = build_model(cfg).to(device)
-        if distributed and device.type == "cuda":
+
+        if is_main_process() and fold_logger:
+            log_training_hyperparams(cfg, fold_logger)
+            log_model_hyperparams(cfg, fold_logger)
+            log_param_counts(model, fold_logger)
+
+        if distributed:
+            if device.type != "cuda":
+                raise RuntimeError("CPU distributed not supported; use CUDA or run single-process.")
             model = torch.nn.parallel.DistributedDataParallel(
                 model,
                 device_ids=[local_rank],
                 output_device=local_rank,
             )
-        else:
-            raise RuntimeError("CPU distributed not supported; use CUDA or run single-process.")
 
         optimizer = build_optimizer(model, cfg)
 
@@ -382,8 +406,8 @@ def run_logo_cv(cfg, args, device, local_rank, distributed, base_logger, base_wr
 
         # train this fold
         trainer.train(
-            num_epochs=cfg["training"]["epochs"],
-            checkpoint_dir=ckpt_dir,
+            epochs=cfg["training"]["epochs"],
+            ckpt_dir=ckpt_dir,
             validate_interval=cfg["training"].get("val_interval", 1),
         )
 
