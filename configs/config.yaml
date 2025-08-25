@@ -1,17 +1,19 @@
 model:
   name: SyntalNet
-  args: {}
+  args: {
+    ind_cls_heads: ["Engagement", "Lead"]
+  }
 
 dataset:
   args:
-    root_dir: "./data"
+    root_dir: "./dataset/processed"
     modalities: ["face", "pose", "video", "turns", "utterance", "sentiment", "prosody", "audio",]
   split:
     mode: "item"  # "item" or "group" based split
     ratio: 0.2    # train-val split ratio
     groups: []    # groups to hold out for val
     seed: 17
-  stats_dir: "./configs/normalization_stats.yaml"
+  # stats_dir: "./configs/normalization_stats.yaml"
   class_counts:
     individual:
       Engagement: [2006, 6078, 1996]
@@ -25,19 +27,20 @@ training:
   seed: 42
   num_workers: 4
   epochs: 100
-  batch_size: 16
-  val_batch_size: 16
-  learning_rate: 3e-4
-  weight_decay: 1e-4
+  batch_size: 8
+  val_batch_size: 8
+  learning_rate: 3.e-4
+  weight_decay: 1.e-4
   warmup_steps: 1000
-  min_lr: 1e-6
+  min_lr: 1.e-6
   grad_clip: 1.0
-  accum_steps: 1
+  accum_steps: 4
   amp: False
   cb_beta: 0.999
   focal_gamma: 2.0
   label_smoothing: 0.05
   val_interval: 1
+  ckpt_interval: 10
 
 logging:
   log_dir: ./logs

@@ -5,11 +5,11 @@ import torch.distributed as dist
 from torch.nn.modules.utils import _pair
 from typing import List, Tuple, Sequence, Union, Optional, Dict
 
-from . import utils as mutils
-from base_model import BaseModel
-from squeeze_excite import CrossSE
-from partial import PartialConv2d, PartialAvgPool2d
-from fusion import GPSFusion, GLRFusion
+import models.utils as mutils
+from models.base_model import BaseModel
+from models.squeeze_excite import CrossSE
+from models.partial import PartialConv2d, PartialAvgPool2d
+from models.fusion import GPSFusion, GLRFusion
 
 
 class CNNBackbone(nn.Module):

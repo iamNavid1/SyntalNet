@@ -8,6 +8,7 @@ from torch.amp import autocast
 from torch.utils.data.distributed import DistributedSampler
 
 from utils.metrics import build_classification_metrics, compute_metrics
+from engine.utils import modalities_to_branches
 
 
 class Validator:
@@ -22,12 +23,13 @@ class Validator:
         self,
         model: torch.nn.Module,
         dataloader,
+        loss_fn = None,
     ):
         model.eval()
 
         metric_sets = self._build_metric_sets(model)
-        if not metric_sets:
-            return {}
+        if not metric_sets and loss_fn is None:
+            return {}, None
 
         ddp_eval = self._is_ddp_eval(dataloader)
 
@@ -38,12 +40,21 @@ class Validator:
         else:
             head_specs, buffers = None, None
 
+        total_loss = 0.0
+        count = 0.0
+
         for batch_data, batch_labels in dataloader:
             batch_data = {k: (v[0].to(self.device), v[1].to(self.device)) for k, v in batch_data.items()}
+            batch_data = modalities_to_branches(batch_data)
             batch_labels = {k: v.to(self.device) for k, v in batch_labels.items()}
 
             with autocast(**self.autocast_kwargs):
                 _, logits = model(batch_data)
+                if loss_fn is not None:
+                    ind_label, grp_label = self._prepare_label_views(batch_labels)
+                    loss = loss_fn(logits, ind_label, grp_label)
+                    total_loss += float(loss.item())
+                    count += 1
 
             if ddp_eval:
                 for k in ("individual", "group"):
@@ -54,9 +65,18 @@ class Validator:
                     if k in metric_sets and k in logits and k in batch_labels:
                         self._update_metric(metric_sets[k], logits[k], batch_labels[k])
 
+        if loss_fn is not None:
+            loss_tensor = torch.tensor([total_loss, count], device=self.device)
+            if ddp_eval and dist.is_initialized():
+                dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+            total_loss, count = loss_tensor.tolist()
+            val_loss = (total_loss / count) if count > 0 else float("nan")
+        else:
+            val_loss = None
+
         # non-DDP: compute results from local metric modules
         if not ddp_eval:
-            return self._metrics_results(metric_sets)
+            return self._metrics_results(metric_sets), val_loss
 
         # DDP: gather per-head tensors to rank 0, compute once, broadcast
         gathered = self._gather_per_head(buffers, head_specs)
@@ -68,7 +88,7 @@ class Validator:
         obj_list = [results]
         dist.broadcast_object_list(obj_list, src=0)
         results = obj_list[0]
-        return results
+        return results, val_loss
 
     __call__ = run 
 
@@ -111,6 +131,16 @@ class Validator:
                 metric_sets["group"][name] = metrics
 
         return metric_sets
+
+    def _prepare_label_views(self, labels: Dict[str, torch.Tensor]):
+        ind_label = None
+        grp_label = None
+        if "individual" in labels:
+            B, P, L = labels["individual"].shape
+            ind_label = labels["individual"].view(B * P, L)
+        if "group" in labels:
+            grp_label = labels["group"]
+        return ind_label, grp_label
 
     # --------------------------- Update paths ---------------------------
 

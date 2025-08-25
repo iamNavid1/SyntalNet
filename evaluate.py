@@ -45,7 +45,7 @@ def main():
     autocast_kwargs = BuildAutocastKWargs(cfg, device)
     validator = Validator(device=device, autocast_kwargs=autocast_kwargs)
 
-    metrics = validator.run(model, loader)
+    metrics, _ = validator.run(model, loader)
 
     print(json.dumps(metrics, indent=2))
 

@@ -144,7 +144,7 @@ def build_datasets(cfg, logo_held_out=None):
         val_cfg["include_groups"] = [logo_held_out]
         return GroupDynamicsDataset(**train_cfg), GroupDynamicsDataset(**val_cfg)
     
-    split_cfg = cfg["dataset"].get("val_split")
+    split_cfg = cfg["dataset"].get("split")
     mode = split_cfg.get("mode", "item")
     split_seed = int(split_cfg.get("seed", cfg["training"].get("seed", 42)))
 
@@ -169,7 +169,7 @@ def build_datasets(cfg, logo_held_out=None):
         return GroupDynamicsDataset(**train_cfg), GroupDynamicsDataset(**val_cfg)
 
     else:
-        raise ValueError(f"Unknown val_split.mode: {mode}")
+        raise ValueError(f"Unknown split.mode: {mode}")
 
 def build_loaders(cfg, train_dataset, val_dataset, distributed: bool):
     num_workers = cfg["training"].get("num_workers", 4)
@@ -263,6 +263,7 @@ def run_training(cfg, args, device, local_rank, distributed, logger, writer):
         epochs=cfg["training"]["epochs"],
         ckpt_dir=ckpt_dir,
         validate_interval=cfg["training"].get("val_interval", 1),
+        checkpoint_interval=cfg["training"].get("checkpoint_interval", 1),
     )
 
 # ----------------------------- LOGO helpers -----------------------------
@@ -409,6 +410,7 @@ def run_logo_cv(cfg, args, device, local_rank, distributed, base_logger, base_wr
             epochs=cfg["training"]["epochs"],
             ckpt_dir=ckpt_dir,
             validate_interval=cfg["training"].get("val_interval", 1),
+            checkpoint_interval=cfg["training"].get("checkpoint_interval", 1),
         )
 
         mark_fold_done(ckpt_dir, {"held_out_group": held_out, "fold_index": i})

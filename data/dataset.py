@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from transforms import resample_features
+from data.transforms import resample_features
 
 COLUMNS_TO_KEEP = {
     'face': [
@@ -233,7 +233,7 @@ class GroupDynamicsDataset(Dataset):
                     feat_tensor = torch.tensor(arr, dtype=torch.float)
                     # expected shape of the video features post temporal upsampling
                     expected_len = (2 * self.snippet_length - self.len_overlap) * self.resample_freq
-                    mask_tensor = torch.ones([expected_len, feat_tensor.shape[1]], dtype=torch.bool)
+                    mask_tensor = torch.ones([expected_len, feat_tensor.shape[1]])
                     all_feat.append(feat_tensor)
                     all_mask.append(mask_tensor)
                 # shape: (num_person, 57, ...)
@@ -254,8 +254,8 @@ class GroupDynamicsDataset(Dataset):
                                  COLUMNS_TO_KEEP['turns']]
                     sub = sub.replace({'True': 1, 'False': 0})
                     sub = sub.astype(float)
-                    feat_tensor = torch.tensor(sub.values, dtype=float)
-                    mask_tensor = torch.ones_like(feat_tensor, dtype=torch.bool)
+                    feat_tensor = torch.tensor(sub.values, dtype=torch.float)
+                    mask_tensor = torch.ones_like(feat_tensor)
                     all_feat.append(feat_tensor)
                     all_mask.append(mask_tensor)
                 # shape: (num_person, num_turns, ...) *variable length sequence
@@ -272,7 +272,7 @@ class GroupDynamicsDataset(Dataset):
                     npy_i_path = os.path.join(folder, f"Group{gid:02}_Person{pid}_Clip{clip_i+1}.npy")
                     arr = self._load_npy(npy_i_path)
                     feat_tensor = torch.tensor(arr, dtype=torch.float)
-                    mask_tensor = torch.ones_like(feat_tensor, dtype=torch.bool)
+                    mask_tensor = torch.ones_like(feat_tensor)
                     all_feat.append(feat_tensor)
                     all_mask.append(mask_tensor)                    
                 # shape: (num_person, num_turns, ...) *variable length sequence
@@ -311,7 +311,7 @@ class GroupDynamicsDataset(Dataset):
                     else:
                         merged = np.concatenate([merged, np.repeat(merged[-1:], 4, axis=0)], axis=0)
                     feat_tensor = torch.tensor(merged, dtype=torch.float)
-                    mask_tensor = torch.ones_like(feat_tensor, dtype=torch.bool)
+                    mask_tensor = torch.ones_like(feat_tensor)
                     all_feat.append(feat_tensor)
                     all_mask.append(mask_tensor)
                 # shape: (num_person, (2*clip_length-overlap)*resample_freq, ...)
@@ -350,7 +350,7 @@ class GroupDynamicsDataset(Dataset):
                     else:
                         merged = np.concatenate([merged, np.repeat(merged[-1:], 4, axis=0)], axis=0)
                     feat_tensor = torch.tensor(merged, dtype=torch.float)
-                    mask_tensor = torch.ones_like(feat_tensor, dtype=torch.bool)
+                    mask_tensor = torch.ones_like(feat_tensor)
                     all_feat.append(feat_tensor)
                     all_mask.append(mask_tensor)
                 # shape: (num_person, (2*clip_length-overlap)*resample_freq, ...)

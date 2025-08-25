@@ -6,17 +6,17 @@ def _pad_across_batch(data_list, mask_list, pad_value=0):
     Pads a list of per-sample tensors to the maximum sequence length across batch.
 
     :param data_list: List[Tensor], each of shape (num_person, L_i, feat_dim)
-    :param mask_list: List[BoolTensor], same shapes as data_list
+    :param mask_list: List[Tensor], same shapes as data_list
     :param pad_value: value to use for padding the data tensor
     :returns padded_data: Tensor of shape (batch, num_person, L_max, feat_dim)
-    :returns padded_mask: BoolTensor of same shape
+    :returns padded_mask: Tensor of same shape (1=valid, 0=pad)
     """
     batch_size = len(data_list)
     num_person, _, feat_dim = data_list[0].shape
     L_max = max(x.shape[1] for x in data_list)
 
     padded_data = torch.full((batch_size, num_person, L_max, feat_dim), pad_value, dtype=data_list[0].dtype)
-    padded_mask = torch.zeros((batch_size, num_person, L_max, feat_dim), dtype=torch.bool)
+    padded_mask = torch.zeros((batch_size, num_person, L_max, feat_dim), dtype=mask_list[0].dtype)
 
     for i, (x, m) in enumerate(zip(data_list, mask_list)):
         L = x.shape[1]
@@ -31,17 +31,17 @@ def _pad_within_sample(data_list, mask_list, pad_value=0):
     Pads per-person sequences within a single sample to the maximum length among persons.
 
     :param data_list: List[Tensor], each of shape (L_j, feat_dim)
-    :param mask_list: List[BoolTensor], same shapes
+    :param mask_list: List[Tensor], same shapes
     :param pad_value: value to use for padding the data tensor
     :returns data_tensor: Tensor of shape (num_person, L_sample_max, feat_dim)
-    :returns mask_tensor: BoolTensor of same shape
+    :returns mask_tensor: Tensor of same shape (1=valid, 0=pad)
     """
     num_person = len(data_list)
     feat_dim = data_list[0].shape[1]
     L_sample_max = max(x.shape[0] for x in data_list)
 
     data_tensor = torch.full((num_person, L_sample_max, feat_dim), pad_value, dtype=data_list[0].dtype)
-    mask_tensor = torch.zeros((num_person, L_sample_max, feat_dim), dtype=torch.bool)
+    mask_tensor = torch.zeros((num_person, L_sample_max, feat_dim), dtype=mask_list[0].dtype)
 
     for j, (x, m) in enumerate(zip(data_list, mask_list)):
         L = x.shape[0]

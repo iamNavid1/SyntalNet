@@ -5,8 +5,8 @@ import torch.nn.functional as F
 from torch.nn.modules.utils import _pair
 from typing import Tuple, Optional, Dict, Any, List
 
-from partial import PartialConv2d, PartialAvgPool2d, PartialGeM
-from utils import ChannelLayerNorm2d
+from models.partial import PartialConv2d, PartialAvgPool2d, PartialGeM
+from models.utils import ChannelLayerNorm2d
 
 
 class DepthwiseSeparable(nn.Module):

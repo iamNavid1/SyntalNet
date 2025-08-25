@@ -1,4 +1,5 @@
 from typing import Dict
+import numpy as np
 import torch
 
 
@@ -30,3 +31,58 @@ def _detach_tree(x):
         t = type(x)
         return t(_detach_tree(v) for v in x)
     return x
+
+
+BRANCH_MODALITY_MAP = {
+    "videokinetic": {
+        "feat": ["face", "pose"],
+        "emb": "video",
+    },
+    "dialogue": {
+        "feat": ["turns"],
+        "emb": "utterance",
+    },
+    "acoustic": {
+        "feat": ["sentiment", "prosody"],
+        "emb": "audio",
+    },
+}
+
+
+def modalities_to_branches(batch_data: Dict[str, tuple]) -> Dict[str, tuple]:
+    """
+    Group modality tensors into SyntalNet branches.
+    """
+    branch_data: Dict[str, tuple] = {}
+    for branch, spec in BRANCH_MODALITY_MAP.items():
+        try:
+            feat_tensors = [batch_data[m][0] for m in spec["feat"]]
+            feat_masks = [batch_data[m][1] for m in spec["feat"]]
+            emb_tensor, emb_mask = batch_data[spec["emb"]]
+        except KeyError:
+            # If any modality for this branch is missing, skip the branch
+            continue
+        branch_data[branch] = (feat_tensors, feat_masks, emb_tensor, emb_mask)
+    return branch_data
+
+
+def format_metrics(metrics: Dict[str, Dict]) -> str:
+    def _format(d: Dict, indent: int) -> list[str]:
+        lines = []
+        for key, value in d.items():
+            if isinstance(value, dict):
+                lines.append(" " * indent + f"{key}:")
+                lines.extend(_format(value, indent + 2))
+            else:
+                if isinstance(value, np.ndarray):
+                    arr = np.array2string(value, separator=", ")
+                    arr = arr.replace("\n", "\n" + " " * (indent + 2))
+                    value_str = arr
+                else:
+                    value_str = str(value)
+                lines.append(" " * indent + f"{key}: {value_str}")
+        return lines
+
+    if isinstance(metrics, str):
+        return metrics
+    return "\n".join(_format(metrics, 0))

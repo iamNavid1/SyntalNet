@@ -19,16 +19,16 @@ def resample_features(
     :param end_time (float): End of the target time window.
     :param resample_freq (int): Number of samples per second.
     :param gap_threshold (float): Max time delta allowed for interpolation continuity (in seconds).
-    :param return_mask (bool): If True, also return a boolean mask indicating invalid interpolations.
+    :param return_mask (bool): If True, also return a binary mask indicating invalid interpolations.
     :return torch.Tensor: Resampled tensor of shape (num_samples, num_features).
-    :return Optional[torch.Tensor]: Boolean mask of shape (num_samples,) where True = invalid interpolation.
+    :return Optional[torch.Tensor]: Binary mask of shape (num_samples,) where True = invalid interpolation.
     """
     if features_df.empty or 'timestamp' not in features_df.columns:
         num_samples = int((end_time - start_time) * resample_freq)
         num_features = len([col for col in features_df.columns if col != 'timestamp'])
         empty_tensor = torch.zeros((num_samples, num_features), dtype=torch.float)
         if return_mask:
-            return empty_tensor, torch.zeros_like(empty_tensor, dtype=torch.bool)
+            return empty_tensor, torch.zeros_like(empty_tensor, dtype=torch.float)
         return empty_tensor
 
     # prepare features_df
@@ -84,8 +84,8 @@ def resample_features(
     stacked_tensor = torch.tensor(stacked, dtype=torch.float)
 
     if return_mask:
-        mask_2d = np.tile(mask[:, None], (1, stacked.shape[1])).astype(bool)  # shape: (num_samples, num_features)
-        return stacked_tensor, torch.tensor(mask_2d, dtype=torch.bool)
+        mask_2d = np.tile(mask[:, None], (1, stacked.shape[1])).astype(float)  # shape: (num_samples, num_features)
+        return stacked_tensor, torch.tensor(mask_2d, dtype=torch.float)
     return stacked_tensor
 
 

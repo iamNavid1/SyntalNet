@@ -26,6 +26,7 @@ class ClassBalancedFocalLoss(BaseLoss):
         counts: torch.Tensor,
         beta: float = 0.9999,
         gamma: float = 2.0,
+        smoothing: float = 0.0,
         mode: Literal["focal", "sigmoid", "softmax"] = "focal",
     ):
         super().__init__()
@@ -36,6 +37,7 @@ class ClassBalancedFocalLoss(BaseLoss):
         self.register_buffer("alpha", weights)
         self.beta = float(beta)
         self.gamma = float(gamma)
+        self.smoothing = float(smoothing)
         self.mode = mode
         self.num_classes = int(counts.numel())
 
@@ -59,7 +61,11 @@ class ClassBalancedFocalLoss(BaseLoss):
         N, C = logits.shape
         labels_one_hot = self._one_hot(target)  # [N, C]
 
-        # Broadcasred per-sample scalar weight of true class
+        if self.smoothing > 0.0 and C > 1:
+            eps = self.smoothing
+            labels_one_hot = labels_one_hot * (1 - eps) + eps / (C - 1) * (1 - labels_one_hot)
+
+        # Broadcast per-sample scalar weight of true class
         alpha_per_sample = self._per_example_alpha(target)         # [N]
         weights_matrix = alpha_per_sample.view(N, 1).expand(N, C)  # [N, C]
 

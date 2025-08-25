@@ -11,8 +11,8 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from utils.losses import BaseLoss, ClassBalancedFocalLoss
-from .utils import BuildAutocastKWargs
-from .validator import Validator
+from engine.utils import BuildAutocastKWargs, modalities_to_branches, format_metrics
+from engine.validator import Validator
 
 
 class Trainer:
@@ -59,22 +59,41 @@ class Trainer:
 
     # ------------------------- public API -----------------------------
 
-    def train(self, epochs: int, ckpt_dir: str, validate_interval: int = 1):
+    def train(
+        self,
+        epochs: int,
+        ckpt_dir: str,
+        validate_interval: int = 1,
+        checkpoint_interval: int = 1,
+    ):
         os.makedirs(ckpt_dir, exist_ok=True)
+
+        best_val_loss = float("inf")
 
         for epoch in range(self.start_epoch, epochs):
             if isinstance(self.train_loader.sampler, torch.utils.data.distributed.DistributedSampler):
                 self.train_loader.sampler.set_epoch(epoch)
             self._train_one_epoch(epoch)
 
+            val_loss = None
             if self.val_loader is not None and (epoch + 1) % validate_interval == 0:
-                metrics = self.validate()
-                self.logger.info(f"Validation @ epoch {epoch+1}: {metrics}")
+                metrics, val_loss = self.validate()
+                self.logger.info(f"Validation @ epoch {epoch+1}: {format_metrics(metrics)}")
+
+            save_best = False
+            if val_loss is not None and val_loss < best_val_loss:
+                best_val_loss = val_loss
+                save_best = True
 
             if torch.distributed.is_initialized():
                 torch.distributed.barrier()
 
-            if self._is_main():
+            if self._is_main() and (
+                ((epoch + 1) % checkpoint_interval == 0) 
+                or ((epoch + 1) == epochs)
+                or save_best
+            ):
+                print(f"Saving checkpoint for epoch {epoch+1} to {ckpt_dir}...")
                 ckpt_path = os.path.join(ckpt_dir, f"epoch_{epoch+1}.pth")
                 self.save_checkpoint(ckpt_path, epoch)
 
@@ -83,14 +102,24 @@ class Trainer:
 
     def validate(self):
         if self.val_loader is None:
-            return {}
-        results = self.validator(self.model, self.val_loader)
+            return {}, None
+        results, val_loss = self.validator(self.model, self.val_loader, self._compute_loss)
+        if val_loss is not None:
+            results["loss"] = val_loss
         if self._is_main():
+            if val_loss is not None:
+                self.writer.add_scalar("val/loss", val_loss, self.global_step)
             for group_name, heads in results.items():
+                if group_name == "loss":
+                    continue
                 for head_name, res in heads.items():
                     for k, v in res.items():
-                        self.writer.add_scalar(f"val/{group_name}_{head_name}_{k}", v, self.global_step)
-        return results
+                        if k == "confusion_matrix":
+                            cm = torch.as_tensor(v, dtype=torch.float32)
+                            self.writer.add_image(f"val/{group_name}_{head_name}_{k}", cm, self.global_step, dataformats="HW")
+                        else:
+                            self.writer.add_scalar(f"val/{group_name}_{head_name}_{k}", v, self.global_step)
+        return results, val_loss
 
 
     def save_checkpoint(self, path: str, epoch: int):
@@ -116,7 +145,7 @@ class Trainer:
         self.scaler.load_state_dict(state.get("scaler", {}))
         self.global_step = state.get("global_step", 0)
         self.start_epoch = state.get("epoch")
-        self.logger.info(f"Resumed from checkpoint {path} at epoch {state.get("epoch")}")
+        self.logger.info(f"Resumed from checkpoint {path} at epoch {state.get('epoch')}")
         return state
 
     # ------------------------- private API -----------------------------
@@ -130,6 +159,7 @@ class Trainer:
         for step, (batch_data, batch_labels) in enumerate(self.train_loader):
             steps += 1
             batch_data = {k: (v[0].to(self.device), v[1].to(self.device)) for k, v in batch_data.items()}
+            batch_data = modalities_to_branches(batch_data)
             batch_labels = {k: v.to(self.device) for k, v in batch_labels.items()}
 
             ind_label, grp_label = self._prepare_label_views(batch_labels)
