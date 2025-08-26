@@ -136,23 +136,41 @@ STANDARDIZATION_GROUPS: Dict[str, Dict[str, List[int]]] = {
     },
 }
 
+EMBEDDING_DIMS: Dict[str, int] = {
+    'video': 1024,
+    'utterance': 1024,
+    'audio': 512,
+}
+
 
 class StandardizeTransform:
     """Apply group-wise standardization using pre-computed statistics."""
 
     def __init__(self, stats_dict: Dict[str, Dict[str, Dict[str, float]]]):
-        self.stats: Dict[str, Dict[str, Dict[str, torch.Tensor]]] = {}
+        self.stats: Dict[str, Any] = {}
         for mod, groups in stats_dict.items():
-            self.stats[mod] = {}
-            for grp, ms in groups.items():
-                self.stats[mod][grp] = {
-                    'mean': torch.as_tensor(ms['mean'], dtype=torch.float),
-                    'std': torch.as_tensor(ms['std'], dtype=torch.float),
+            if mod in EMBEDDING_DIMS:
+                self.stats[mod] = {
+                    'mean': torch.as_tensor(groups['mean'], dtype=torch.float),
+                    'std': torch.as_tensor(groups['std'], dtype=torch.float),
                 }
+            else:
+                self.stats[mod] = {}
+                for grp, ms in groups.items():
+                    self.stats[mod][grp] = {
+                        'mean': torch.as_tensor(ms['mean'], dtype=torch.float),
+                        'std': torch.as_tensor(ms['std'], dtype=torch.float),
+                    }
 
     def _apply(self, tensor: torch.Tensor, mod: str) -> torch.Tensor:
         if mod not in self.stats:
             return tensor
+
+        if mod in EMBEDDING_DIMS:
+            mean = self.stats[mod]['mean'].to(tensor.device)
+            std = self.stats[mod]['std'].to(tensor.device)
+            return (tensor - mean) / (std + 1e-6)
+
         out = tensor.clone()
         for grp, idxs in STANDARDIZATION_GROUPS.get(mod, {}).items():
             if grp not in self.stats[mod]:

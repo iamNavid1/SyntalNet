@@ -13,7 +13,7 @@ def _pad_across_batch(data_list, mask_list, pad_value=0):
     """
     batch_size = len(data_list)
     num_person, _, feat_dim = data_list[0].shape
-    L_max = max(x.shape[1] for x in data_list)
+    L_max = max(max(x.shape[1] for x in data_list), 5)
 
     padded_data = torch.full((batch_size, num_person, L_max, feat_dim), pad_value, dtype=data_list[0].dtype)
     padded_mask = torch.zeros((batch_size, num_person, L_max, feat_dim), dtype=mask_list[0].dtype)

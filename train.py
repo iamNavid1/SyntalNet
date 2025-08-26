@@ -138,6 +138,7 @@ def build_datasets(cfg, logo_held_out=None):
         transform = StandardizeTransform(norm_stats)
         train_cfg["transforms"] = transform
         val_cfg["transforms"] = transform
+        args["transforms"] = transform
 
     if logo_held_out is not None:
         train_cfg["exclude_groups"] = [logo_held_out]

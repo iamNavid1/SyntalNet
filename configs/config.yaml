@@ -13,7 +13,7 @@ dataset:
     ratio: 0.2    # train-val split ratio
     groups: []    # groups to hold out for val
     seed: 17
-  # stats_dir: "./configs/normalization_stats.yaml"
+  stats_dir: "./configs/normalization_stats.yaml"
   class_counts:
     individual:
       Engagement: [2006, 6078, 1996]
