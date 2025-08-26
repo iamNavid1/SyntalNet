@@ -328,7 +328,7 @@ class CosineProtoClassifier(nn.Module):
             self, 
             dim: int, 
             num_classes: int = 3,
-            init_scale_lin: float = 16.0,
+            init_scale_param: float = 16.0,
             use_prototypes: bool = True,
             init_scale_proto: float = 10.0,
             proto_momentum: float = 0.99,
@@ -341,12 +341,12 @@ class CosineProtoClassifier(nn.Module):
         self.D = dim
         self.K = num_classes
 
-        # linear cosine classifier weights (D,K) and scale
+        # parametric cosine classifier
         self.W = nn.Parameter(torch.empty(num_classes, dim))
         nn.init.normal_(self.W, std=0.02)
-        self.log_scale_lin = nn.Parameter(torch.log(torch.tensor(init_scale_lin)))
+        self.log_scale_param = nn.Parameter(torch.log(torch.tensor(init_scale_param)))
 
-        # prototypes cosine classifier
+        # prototype cosine classifier
         self.use_prototypes = use_prototypes
         self.m = proto_momentum
         self.warmup_epochs = warmup_epochs
@@ -399,8 +399,8 @@ class CosineProtoClassifier(nn.Module):
         self.proto_counts += cnts.to(self.proto_counts.dtype)
 
     def forward(self, z: torch.Tensor, epoch: Optional[int] = None) -> torch.Tensor:
-        s_lin = torch.exp(self.log_scale_lin).clamp(1., 100.)
-        logits_lin = self._cos_logits(z, self.W, s_lin)
+        s_param = torch.exp(self.log_scale_param).clamp(1., 100.)
+        logits_param = self._cos_logits(z, self.W, s_param)
 
         if self.use_prototypes:
             s_proto = torch.exp(self.log_scale_proto).clamp(1., 100.)
@@ -408,14 +408,14 @@ class CosineProtoClassifier(nn.Module):
             # mask unseen classes for prototypes
             seen = (self.proto_counts > 0).float()
             if (seen == 0).any():
-                logits_proto = logits_proto * seen.unsqueeze(0) + logits_lin * (1 - seen).unsqueeze(0)
+                logits_proto = logits_proto * seen.unsqueeze(0) + logits_param * (1 - seen).unsqueeze(0)
 
             lam = torch.sigmoid(self.fuse_logit)  # (K,)
             if epoch is not None and epoch < self.warmup_epochs:
                 lam = lam * 0.0
-            logits = (1 - lam.unsqueeze(0)) * logits_lin + lam.unsqueeze(0) * logits_proto
+            logits = (1 - lam.unsqueeze(0)) * logits_param + lam.unsqueeze(0) * logits_proto
         else:
-            logits = logits_lin
+            logits = logits_param
 
         # add temperature
         T = (torch.exp(self.log_T) if self.log_T is not None else self.T_buffer).clamp(1e-3, 100.0)
@@ -592,7 +592,7 @@ class SyntalNet(BaseModel):
         if self.group_classifier is not None:
             z = z_dict["group"]["per_head"]
             y = y_dict["group"]
-            assert y, "No individual logits found in y_dict['group']"
+            assert y, "No group logits found in y_dict['group']"
             self.group_classifier.update_prototypes(z, y)
 
     def forward(self, batch_data, epoch = None):
