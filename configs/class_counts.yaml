@@ -33,3 +33,12 @@ kalman:
     Synchrony:  [84, 3179, 97]
     Confidence: [94, 3155, 111]
     Transition: [84, 3138, 138]
+
+threshold:
+  individual:
+    Engagement: [575, 8981, 524]
+    Lead:       [393, 9344, 343]
+  group:
+    Synchrony:  [454, 2452, 454]
+    Confidence: [460, 2383, 517]
+    Transition: [601, 2195, 564]
