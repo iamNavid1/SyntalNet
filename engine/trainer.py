@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import yaml
 import contextlib
 from collections import defaultdict
 from typing import Dict, Optional
@@ -10,7 +11,7 @@ from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-from utils.losses import BaseLoss, ClassBalancedFocalLoss
+from utils.losses import BaseLoss, ClassBalancedFocalLoss, ClassBalancedCELoss
 from engine.utils import BuildAutocastKWargs, modalities_to_branches, format_metrics
 from engine.validator import Validator
 
@@ -49,11 +50,13 @@ class Trainer:
         self.autocast_kwargs = BuildAutocastKWargs(cfg, device)
         self.scaler = self._build_grad_scaler()
 
-        counts = cfg.get("dataset", {}).get("class_counts", {})
-        smoothing = cfg.get("training", {}).get("label_smoothing", 0.0)
-        beta = cfg.get("training", {}).get("cb_beta", 0.999)
-        gamma = cfg.get("training", {}).get("focal_gamma", 2.0)
-        self.criteria = self._build_criteria(counts, smoothing, beta, gamma)
+        counts_cfg = cfg.get("dataset").get("cls_count_dir")
+        label_type = cfg.get("dataset").get("args").get("label_type")
+        smoothing = cfg.get("training").get("label_smoothing", 0.0)
+        beta = cfg.get("training").get("cb_beta", 0.999)
+        gamma = cfg.get("training").get("focal_gamma", 2.0)
+        loss_type = cfg.get("training").get("loss_type", "focal")
+        self.criteria = self._build_criteria(loss_type, counts_cfg, label_type, smoothing, beta, gamma)
 
         self.validator = Validator(self.device, self.autocast_kwargs)
 
@@ -116,6 +119,8 @@ class Trainer:
                     for k, v in res.items():
                         if k == "confusion_matrix":
                             cm = torch.as_tensor(v, dtype=torch.float32)
+                            cm = (cm - cm.min()) / (cm.max() - cm.min() + 1e-8)
+                            cm = torch.nn.functional.interpolate(cm[None, None], size=(256, 256), mode="nearest")[0, 0]
                             self.writer.add_image(f"val/{group_name}_{head_name}_{k}", cm, self.global_step, dataformats="HW")
                         else:
                             self.writer.add_scalar(f"val/{group_name}_{head_name}_{k}", v, self.global_step)
@@ -268,25 +273,35 @@ class Trainer:
 
     def _build_criteria(
         self,
+        loss_type: str,
         counts_cfg: Dict,
+        label_type: str,
         smoothing: float,
         beta: float,
         gamma: float,
     ) -> Dict[str, Dict[str, BaseLoss]]:
         criteria: Dict[str, Dict[str, BaseLoss]] = defaultdict(dict)
 
+        if isinstance(counts_cfg, str):
+            with open(counts_cfg, "r") as f:
+                counts_cfg = yaml.safe_load(f)
+        counts_cfg = counts_cfg.get(label_type)
+
         specs = []
         if getattr(self.model, "individual_classifier", None) is not None:
-            specs.append(("individual", self.model.individual_classifier, counts_cfg.get("individual", {})))
+            specs.append(("individual", self.model.individual_classifier, counts_cfg.get("individual")))
         if getattr(self.model, "group_classifier", None) is not None:
-            specs.append(("group", self.model.group_classifier, counts_cfg.get("group", {})))
+            specs.append(("group", self.model.group_classifier, counts_cfg.get("group")))
 
         for split_name, classifier, counts_map in specs:
             for head_name in classifier.heads:
                 c = torch.tensor(counts_map.get(head_name), dtype=torch.float, device=self.device)
-                criteria[split_name][head_name] = ClassBalancedFocalLoss(
-                    c, beta=beta, gamma=gamma, smoothing=smoothing
-                ).to(self.device)
+                if loss_type == "ce":
+                    criteria[split_name][head_name] = ClassBalancedCELoss(
+                        c, beta, smoothing).to(self.device)
+                else:
+                    criteria[split_name][head_name] = ClassBalancedFocalLoss(
+                        c, beta, gamma, smoothing).to(self.device)
 
         return criteria
 

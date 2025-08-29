@@ -39,6 +39,10 @@ def log_param_counts(model: torch.nn.Module, logger) -> None:
             if getattr(branch, "mc_fusion", None) is not None:
                 mc_params = count_parameters(branch.mc_fusion)
                 logger.info(f"  mc_fusion: {mc_params:,}")
+    else:
+        if hasattr(model, "branch"):
+            b_params = count_parameters(model.branch)
+            logger.info(f"Branch '{model.branch_key}': {b_params:,}")
 
     # Multimodal fusion
     if getattr(model, "mm_fusion", None) is not None:

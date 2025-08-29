@@ -1,15 +1,15 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.distributed as dist
 from torch.nn.modules.utils import _pair
-from typing import List, Tuple, Sequence, Union, Optional, Dict
+from typing import List, Tuple, Optional, Dict
 
-import models.utils as mutils
 from models.base_model import BaseModel
 from models.squeeze_excite import CrossSE
-from models.partial import PartialConv2d, PartialAvgPool2d
 from models.fusion import GPSFusion, GLRFusion
+from models.classifier import ClassificationHead
+from models.partial import PartialConv2d, PartialAvgPool2d, PartialGeM
+from models.utils import MLP, ChannelLayerNorm2d, _preserves_spatial, _is_same_like
 
 
 class CNNBackbone(nn.Module):
@@ -29,7 +29,7 @@ class CNNBackbone(nn.Module):
     ):
         super().__init__()
 
-        self.prenorm = mutils.ChannelLayerNorm2d(in_channels)
+        self.prenorm = ChannelLayerNorm2d(in_channels)
         self.act0 = nn.SiLU(inplace=True) if activation == "silu" else nn.GELU()
         self.conv = PartialConv2d(
             in_channels  = in_channels,
@@ -72,9 +72,9 @@ class CNNBackbone(nn.Module):
             return None, None
 
         stride = _pair(stride)
-        preserves = mutils._preserves_spatial(kernel_size, stride, padding, dilation)
+        preserves = _preserves_spatial(kernel_size, stride, padding, dilation)
         need_mask_update = (stride != (1, 1))
-        ceil = mutils._is_same_like(kernel_size, stride, padding, dilation)
+        ceil = _is_same_like(kernel_size, stride, padding, dilation)
 
         if mask_aware_skip:
             # ----- mask-aware skip -----
@@ -176,34 +176,6 @@ class CNNBackbone(nn.Module):
         return out, mask
 
 
-class MLP(nn.Module):
-    def __init__(
-            self,
-            in_features: int,
-            hidden_features: int = None,
-            out_features: int = None,
-            p_drop: float = 0.2,
-            act_layer: nn.Module = nn.GELU,
-    ):
-        super().__init__()
-        out_features = out_features or in_features
-        hidden_features = hidden_features or max(64, in_features // 2)
-
-        self.ln = nn.LayerNorm(in_features)
-        self.fc1 = nn.Linear(in_features, hidden_features)
-        self.act = act_layer()
-        self.drop1 = nn.Dropout(p_drop)
-        self.fc2 = nn.Linear(hidden_features, out_features)
-
-    def forward(self, x):
-        x = self.ln(x)
-        x = self.fc1(x)
-        x = self.act(x)
-        x = self.drop1(x)
-        x = self.fc2(x)
-        return x
-
-
 class Branch(nn.Module):
     def __init__(
             self,
@@ -211,18 +183,20 @@ class Branch(nn.Module):
             in_ch_feat: int,
             dim_emb: int,
             dim_feat: int,
+            use_emb: bool = True,
+            use_feat: bool = True,
             num_blocks: int = 3,
             upsample_emb: bool = False,
             shared_dim: int = 128,
             shared_out_ch: int = 32,
             ch_expansion: List[int] = [2, 2],
-            ks_emb: List[int | Tuple[int, int]] = [5, 5, 5],
+            ks_emb: List[int | Tuple[int, int]]  = [(5,1), (5,1), (5,1)],
             ks_feat: List[int | Tuple[int, int]] = [5, 5, 5],
-            st_emb: List[int | Tuple[int, int]] = [1, 1, 1],
+            st_emb: List[int | Tuple[int, int]]  = [(1,2), (1,2), (1,2)],
             st_feat: List[int | Tuple[int, int]] = [1, 1, 1],
-            pd_emb: List[int | Tuple[int, int]] = [2, 2, 2],
+            pd_emb: List[int | Tuple[int, int]]  = [(2,0), (2,0), (2,0)],
             pd_feat: List[int | Tuple[int, int]] = [2, 2, 2],
-            dl_emb: List[int | Tuple[int, int]] = [1, 1, 1],
+            dl_emb: List[int | Tuple[int, int]]  = [1, 1, 1],
             dl_feat: List[int | Tuple[int, int]] = [1, 1, 1],
             p_drop_block: float = 0.05,
             activation_block: str = nn.SiLU,
@@ -232,10 +206,17 @@ class Branch(nn.Module):
             activation_proj: str = nn.GELU,
     ):
         super().__init__()
-        assert all(num_blocks == len(lst) for lst in [ks_emb, ks_feat, st_emb, st_feat, pd_emb, pd_feat, dl_emb, dl_feat]), \
-            f"Expected length {num_blocks} for CNN backbone inputs"
-        
-        if upsample_emb:
+
+        if not all(num_blocks == len(lst) for lst in [ks_emb, ks_feat, st_emb, st_feat, pd_emb, pd_feat, dl_emb, dl_feat]):
+            raise ValueError(f"Expected length {num_blocks} for CNN backbone inputs")
+
+        if not (use_emb or use_feat):
+            raise ValueError("At least one of use_emb or use_feat must be True")
+
+        self.use_emb = use_emb
+        self.use_feat = use_feat
+
+        if upsample_emb and use_emb:
             self.emb_upsampler = nn.ConvTranspose1d(
                 in_channels = dim_emb,
                 out_channels = dim_emb,
@@ -249,30 +230,46 @@ class Branch(nn.Module):
         else:
             self.emb_upsampler = None
 
-        self.blocks_emb = nn.ModuleList([
-            CNNBackbone(
-                in_ch_emb if i == 0 else shared_out_ch, shared_out_ch,
-                ks_emb[i], st_emb[i], pd_emb[i], dl_emb[i],
-                p_drop_block, activation_block, 
-                residual, cross_se,
-            ) for i in range(num_blocks)
-        ])
+        if use_emb:
+            self.blocks_emb = nn.ModuleList([
+                CNNBackbone(
+                    in_ch_emb if i == 0 else shared_out_ch, shared_out_ch,
+                    ks_emb[i], st_emb[i], pd_emb[i], dl_emb[i],
+                    p_drop_block, activation_block, 
+                    residual, cross_se,
+                ) for i in range(num_blocks)
+            ])
+        else:
+            self.blocks_emb = None
 
-        self.blocks_feat = nn.ModuleList([
-            CNNBackbone(
-                in_ch_feat if i == 0 else shared_out_ch, shared_out_ch,
-                ks_feat[i], st_feat[i], pd_feat[i], dl_feat[i],
-                p_drop_block, activation_block, 
-                residual, cross_se,
-            ) for i in range(num_blocks)
-        ])
+        if use_feat:
+            self.blocks_feat = nn.ModuleList([
+                CNNBackbone(
+                    in_ch_feat if i == 0 else shared_out_ch, shared_out_ch,
+                    ks_feat[i], st_feat[i], pd_feat[i], dl_feat[i],
+                    p_drop_block, activation_block,
+                    residual, cross_se,
+                ) for i in range(num_blocks)
+            ])
 
-        self.feat_projector = MLP(
-            in_features=dim_feat, hidden_features=32, out_features=shared_dim, 
-            p_drop=p_drop_proj,act_layer=activation_proj
-        )
+            self.feat_projector = MLP(
+                in_features=dim_feat, hidden_features=32, out_features=shared_dim, 
+                p_drop=p_drop_proj,act_layer=activation_proj
+            )
+        else:
+            self.blocks_feat = None
+            self.feat_projector = None
 
-        self.mc_fusion = GPSFusion(C_mod=shared_out_ch, C_exp=ch_expansion)  # intramodality multi-channel fusion
+        if use_emb and use_feat:
+            self.mc_fusion = GPSFusion(C_mod=shared_out_ch, C_exp=ch_expansion)  # intramodality multi-channel fusion
+            self.pool = None
+            self.drop = None
+            self.fc = None
+        else:
+            self.mc_fusion = None
+            self.pool = PartialGeM()
+            self.drop = nn.Dropout(p_drop_proj)
+            self.fc = nn.Linear(shared_out_ch, 2 * shared_out_ch * ch_expansion[0] * ch_expansion[1])
 
     def cnn_block_forward(self, x, m, blocks):
         out = x
@@ -282,222 +279,48 @@ class Branch(nn.Module):
 
     def forward(
             self,
-            x_feat: List[torch.Tensor],  # (B, P, T, F_f_i)
-            m_feat: List[torch.Tensor],  # (B, P, T, F_f_i)
-            x_emb: torch.Tensor,         # (B, P, (T)(T_e), F_e)
-            m_emb: torch.Tensor,         # (B, P, (T)(T_e), F_e)
+            x_feat: Optional[List[torch.Tensor]] = None,  # (B, P, T, F_f_i)
+            m_feat: Optional[List[torch.Tensor]] = None,  # (B, P, T, F_f_i)
+            x_emb: Optional[torch.Tensor] = None,         # (B, P, (T)(T_e), F_e)
+            m_emb: Optional[torch.Tensor] = None,         # (B, P, (T)(T_e), F_e)
     ) -> torch.Tensor:
         
-        B, P, _, _ = x_emb.shape
+        B, P, _, _ = (x_emb.shape if x_emb is not None
+                        else x_feat[0].shape)
 
-        x_feat = torch.cat(x_feat, dim=-1).unsqueeze(2)
-        m_feat = torch.cat(m_feat, dim=-1).unsqueeze(2)
+        if self.use_feat:
+            assert x_feat is not None, "Feature inputs required when use_feat=True"
+            x_feat = torch.cat(x_feat, dim=-1).unsqueeze(2)
+            m_feat = torch.cat(m_feat, dim=-1).unsqueeze(2)
 
-        z_feat, m_feat = self.cnn_block_forward(x_feat, m_feat, self.blocks_feat)
-        z_feat = z_feat.view(B * P, z_feat.shape[-3], z_feat.shape[-2], z_feat.shape[-1])
-        z_feat = self.feat_projector(z_feat)
-        m_feat = m_feat.view(B * P, m_feat.shape[-3], m_feat.shape[-2], m_feat.shape[-1])
-        m_feat = (m_feat.sum(dim=-1, keepdim=True) > 0).expand(B * P, m_feat.shape[-3], m_feat.shape[-2], z_feat.shape[-1])
-        # z_feat = z_feat.view(B, P, z_feat.shape[-3], z_feat.shape[-2], z_feat.shape[-1])
+            z_feat, m_feat = self.cnn_block_forward(x_feat, m_feat, self.blocks_feat)
+            z_feat = z_feat.view(B * P, z_feat.shape[-3], z_feat.shape[-2], z_feat.shape[-1])
+            z_feat = self.feat_projector(z_feat)
+            m_feat = m_feat.view(B * P, m_feat.shape[-3], m_feat.shape[-2], m_feat.shape[-1])
+            m_feat = (m_feat.sum(dim=-1, keepdim=True) > 0).expand(B * P, m_feat.shape[-3], m_feat.shape[-2], z_feat.shape[-1])
 
-        if self.emb_upsampler:
-            x_emb = x_emb.view(B * P, x_emb.shape[-2], x_emb.shape[-1]).transpose(1, 2)
-            x_emb = self.emb_upsampler(x_emb)
-            x_emb = x_emb.view(B, P, x_emb.shape[-2], x_emb.shape[-1]).transpose(2, 3)
-        x_emb = x_emb.unsqueeze(2)
-        m_emb = m_emb.unsqueeze(2)
+        if self.use_emb:
+            assert x_emb is not None, "Embedding inputs required when use_emb=True"
+            if self.emb_upsampler:
+                x_emb = x_emb.view(B * P, x_emb.shape[-2], x_emb.shape[-1]).transpose(1, 2)
+                x_emb = self.emb_upsampler(x_emb)
+                x_emb = x_emb.view(B, P, x_emb.shape[-2], x_emb.shape[-1]).transpose(2, 3)
+            x_emb = x_emb.unsqueeze(2)
+            m_emb = m_emb.unsqueeze(2)
 
-        z_emb, m_emb = self.cnn_block_forward(x_emb, m_emb, self.blocks_emb)
-        z_emb = z_emb.view(B * P, z_emb.shape[-3], z_emb.shape[-2], z_emb.shape[-1])
-        m_emb = m_emb.view(B * P, m_emb.shape[-3], m_emb.shape[-2], m_emb.shape[-1])
+            z_emb, m_emb = self.cnn_block_forward(x_emb, m_emb, self.blocks_emb)
+            z_emb = z_emb.view(B * P, z_emb.shape[-3], z_emb.shape[-2], z_emb.shape[-1])
+            m_emb = m_emb.view(B * P, m_emb.shape[-3], m_emb.shape[-2], m_emb.shape[-1])
         
-        z_branch = self.mc_fusion(z_feat, z_emb, m_feat, m_emb)
+        if self.use_feat and self.use_emb:
+            z_branch = self.mc_fusion(z_feat, z_emb, m_feat, m_emb)
+        else:
+            z, m = (z_feat, m_feat) if self.use_feat else (z_emb, m_emb)
+            z_branch = self.pool(z, m).flatten(1)
+            z_branch = self.drop(z_branch)
+            z_branch = self.fc(z_branch)
 
         return z_branch
-
-
-class CosineProtoClassifier(nn.Module):
-    """
-    Per-label K-class cosine classifier with optional EMA prototypes and per-class fusion.
-    Safe features:
-      - temperature scaling
-      - warm-up for prototype fusion
-      - mask unseen prototypes early
-    """
-    def __init__(
-            self, 
-            dim: int, 
-            num_classes: int = 3,
-            init_scale_param: float = 16.0,
-            use_prototypes: bool = True,
-            init_scale_proto: float = 10.0,
-            proto_momentum: float = 0.99,
-            fuse_init: float = -1.5,
-            warmup_epochs: int = 5,
-            learn_temperature: bool = True,
-            init_temperature: float = 1.0,
-    ):
-        super().__init__()
-        self.D = dim
-        self.K = num_classes
-
-        # parametric cosine classifier
-        self.W = nn.Parameter(torch.empty(num_classes, dim))
-        nn.init.normal_(self.W, std=0.02)
-        self.log_scale_param = nn.Parameter(torch.log(torch.tensor(init_scale_param)))
-
-        # prototype cosine classifier
-        self.use_prototypes = use_prototypes
-        self.m = proto_momentum
-        self.warmup_epochs = warmup_epochs
-        if use_prototypes:
-            self.register_buffer("prototypes", F.normalize(torch.randn(num_classes, dim), dim=1))
-            self.register_buffer("proto_counts", torch.zeros(num_classes))
-            self.log_scale_proto = nn.Parameter(torch.log(torch.tensor(init_scale_proto)))
-            self.fuse_logit = nn.Parameter(torch.full((num_classes,), fuse_init))  # per-class λ in (0,1)
-
-        # temperature
-        self.learn_temperature = learn_temperature
-        if learn_temperature:
-            self.log_T = nn.Parameter(torch.log(torch.tensor(init_temperature)))
-        else:
-            self.register_buffer("T_buffer", torch.tensor(init_temperature))
-            self.log_T = None
-
-    @staticmethod
-    def _cos_logits(z: torch.Tensor, W: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-        z = F.normalize(z, dim=-1)
-        W = F.normalize(W, dim=-1)
-        return scale * (z @ W.t())  # (B,K)
-
-    @torch.no_grad()
-    def update_prototypes(self, z: torch.Tensor, y: torch.Tensor):
-        if not self.use_prototypes:
-            return
-        
-        z = F.normalize(z.float(), dim=-1)
-        y = y.long()
-        K, D = self.K, self.D
-
-        # local class sums & counts
-        mask = F.one_hot(y, num_classes=K).to(z.dtype)
-        sums = mask.t().matmul(z)
-        cnts = mask.sum(dim=0)
-
-        # all-reduce to GLOBAL sums/cnts
-        if dist.is_available() and dist.is_initialized():
-            dist.all_reduce(sums, op=dist.ReduceOp.SUM)
-            dist.all_reduce(cnts, op=dist.ReduceOp.SUM)
-
-        # EMA update
-        nz = (cnts > 0)
-        if nz.any():
-            means = sums[nz] / cnts[nz].unsqueeze(1).clamp_min(1e-6)
-            proto = self.prototypes[nz]
-            updated = self.m * proto + (1.0 - self.m) * means
-            self.prototypes[nz] = F.normalize(updated, dim=1).to(self.prototypes.dtype)
-        self.proto_counts += cnts.to(self.proto_counts.dtype)
-
-    def forward(self, z: torch.Tensor, epoch: Optional[int] = None) -> torch.Tensor:
-        s_param = torch.exp(self.log_scale_param).clamp(1., 100.)
-        logits_param = self._cos_logits(z, self.W, s_param)
-
-        if self.use_prototypes:
-            s_proto = torch.exp(self.log_scale_proto).clamp(1., 100.)
-            logits_proto = self._cos_logits(z, self.prototypes, s_proto)
-            # mask unseen classes for prototypes
-            seen = (self.proto_counts > 0).float()
-            if (seen == 0).any():
-                logits_proto = logits_proto * seen.unsqueeze(0) + logits_param * (1 - seen).unsqueeze(0)
-
-            lam = torch.sigmoid(self.fuse_logit)  # (K,)
-            if epoch is not None and epoch < self.warmup_epochs:
-                lam = lam * 0.0
-            logits = (1 - lam.unsqueeze(0)) * logits_param + lam.unsqueeze(0) * logits_proto
-        else:
-            logits = logits_param
-
-        # add temperature
-        T = (torch.exp(self.log_T) if self.log_T is not None else self.T_buffer).clamp(1e-3, 100.0)
-        return logits / T
-
-
-class ClassificationHead(nn.Module):
-    """
-    Shared trunk + per-label adapters + per-label cosine/proto classifiers.
-    """
-    def __init__(
-            self,
-            dim: int,
-            head_names: List[str],
-            num_classes: int = 3,
-            trunk_hidden: Optional[int] = None, 
-            p_drop_trunk: float = 0.2,
-            adapter_hidden: Optional[int] = None, 
-            p_drop_adapter: float = 0.1,
-            residual: bool = True,
-            use_prototypes: bool = True, 
-            proto_momentum: float = 0.99, 
-            warmup_epochs: int = 5,
-            group_wise: bool = False,
-            person_per_grp: int = 3,
-    ):
-        super().__init__()
-        self.heads = head_names
-        self.P = person_per_grp
-        
-        self.group_wise = group_wise
-        if group_wise:
-            dim = dim * person_per_grp
-        
-        self.residual = residual
-        if residual:
-            self.alpha = nn.Parameter(torch.full((dim,), 1e-4))
-        
-        self.trunk = MLP(dim, trunk_hidden, p_drop=p_drop_trunk)
-
-        self.adapters = nn.ModuleDict({name: MLP(dim, adapter_hidden, p_drop=p_drop_adapter)
-                                       for name in self.heads})
-        self.classifiers = nn.ModuleDict({name: CosineProtoClassifier(dim, num_classes=num_classes,
-                                                                      use_prototypes=use_prototypes,
-                                                                      proto_momentum=proto_momentum,
-                                                                      warmup_epochs=warmup_epochs)
-                                          for name in self.heads})
-
-    @torch.no_grad()
-    def update_prototypes(self, z_dict: Dict[str, torch.Tensor], y_dict: Dict[str, torch.Tensor]):
-        for name in self.heads:
-            if self.group_wise:
-                B, D = z_dict[name].shape
-                B = B // self.P
-                z_dict[name] = z_dict[name].view(B, self.P, D).reshape(B, self.P * D)
-            self.classifiers[name].update_prototypes(z_dict[name], y_dict[name])
-
-    def forward(self, z: torch.Tensor, epoch: Optional[int] = None) -> Dict[str, torch.Tensor]:
-        if self.group_wise:
-            B, D = z.shape
-            B = B // self.P
-            z = z.view(B, self.P, D).reshape(B, self.P * D)
-        
-        z_shared = self.trunk(z)
-        
-        if self.residual:
-            z_shared = z + self.alpha * z_shared 
-
-        z_head: Dict[str, torch.Tensor] = {}
-        logits: Dict[str, torch.Tensor] = {}
-        for name in self.heads:
-            z_out = self.adapters[name](z_shared)
-            if self.residual:
-                z_out = z_shared + self.alpha * z_out
-            z_head[name] = z_out
-            logits[name] = self.classifiers[name](z_out, epoch=epoch)
-
-        features: Dict[str, torch.Tensor | Dict[str, torch.Tensor]] = {
-            'shared': z_shared,
-            'per_head': z_head,
-        }
-        return features, logits
 
 
 class SyntalNet(BaseModel):
@@ -509,12 +332,14 @@ class SyntalNet(BaseModel):
             in_ch_feat: List[int]       = [1, 1, 1],
             dim_emb: List[int]          = [1024, 1024, 512],
             dim_feat: List[int]         = [394, 12, 12],
+            use_emb: bool               = True,
+            use_feat: bool              = True,
             num_blocks: List[int]       = [3, 3, 3],
             upsample_emb: bool          = [True, False, False],
             shared_dim: int             = 128,
             shared_out_ch: int          = 32,
             ch_expansion: List[int]     = [2, 2],
-            stride_emb: List[List[int]] = [[2, 2, 2], [2, 2, 2], [1, 2, 2]],
+            stride_emb: List[List[int]] = [[(1,2), (1,2), (1,2)], [(1,2), (1,2), (1,2)], [(1,1), (1,2), (1,2)]],
             branch_residual: bool       = True,
             cross_se: bool              = True,
             ind_cls_heads: Tuple[str]   = (),
@@ -522,13 +347,18 @@ class SyntalNet(BaseModel):
             use_prototypes: bool        = True,
             proto_warmup_epochs: int    = 5,
             cls_residual: bool          = True,
+            cls_head_type: str          = "cosine",
     ):
         super().__init__()
 
         assert all(branch in ['Videokinetic', 'Dialogue', 'Acoustic'] for branch in branches), \
             "Branches must be one of 'Videokinetic', 'Dialogue', or 'Acoustic'"
-        assert len(branches) == len(in_ch_emb) == len(in_ch_feat) == len(dim_emb) == len(dim_feat) == len(num_blocks) == len(upsample_emb), \
+
+        assert len(branches) == len(in_ch_emb) == len(in_ch_feat) == len(dim_emb) == len(dim_feat) == len(num_blocks) == len(upsample_emb) == len(stride_emb), \
             "All input lists (branches, in_ch_emb, in_ch_feat, dim_emb, dim_feat, num_blocks, upsample_emb) must have the same length"
+            
+        assert all(len(s) == nb for s, nb in zip(stride_emb, num_blocks)), \
+            "Each stride_emb[i] must have length equal to num_blocks[i]"
 
         self.branches = nn.ModuleDict()
         for i, branch in enumerate(branches):
@@ -537,45 +367,53 @@ class SyntalNet(BaseModel):
                 in_ch_feat    = in_ch_feat[i],
                 dim_emb       = dim_emb[i],
                 dim_feat      = dim_feat[i],
+                use_emb       = use_emb,
+                use_feat      = use_feat,
                 num_blocks    = num_blocks[i],
                 upsample_emb  = upsample_emb[i],
                 shared_dim    = shared_dim,
                 shared_out_ch = shared_out_ch,
-                st_emb        = [(1, s) for s in stride_emb[i]],
+                ch_expansion  = ch_expansion,
+                st_emb        = stride_emb[i],
                 residual      = branch_residual,
                 cross_se      = cross_se,
             )
 
-        self.mm_fusion = GLRFusion(
-            dims_mod     = [2 * shared_out_ch * ch_expansion[0] * ch_expansion[1] for _ in range(len(branches))],
-            dim_hidden   = shared_out_ch * ch_expansion[0] * ch_expansion[1],
-            rank_pair    = shared_out_ch,
-            alloc_hidden = 2 * shared_out_ch,
-            dim_out      = dim_out,
-        )
+        if len(branches) > 1:
+            self.mm_fusion = GLRFusion(
+                dims_mod     = [2 * shared_out_ch * ch_expansion[0] * ch_expansion[1] for _ in range(len(branches))],
+                dim_hidden   = shared_out_ch * ch_expansion[0] * ch_expansion[1],
+                rank_pair    = shared_out_ch,
+                alloc_hidden = 2 * shared_out_ch,
+                dim_out      = dim_out,
+            )
+        else:
+            self.mm_fusion = None
 
         self.individual_classifier = None
         self.group_classifier = None
 
         if ind_cls_heads:
             self.individual_classifier = ClassificationHead(
-                dim            = dim_out,
-                head_names     = list(ind_cls_heads),
-                use_prototypes = use_prototypes,
-                residual       = cls_residual,
-                warmup_epochs  = proto_warmup_epochs,
+                dim             = dim_out,
+                head_names      = list(ind_cls_heads),
+                use_prototypes  = use_prototypes,
+                residual        = cls_residual,
+                warmup_epochs   = proto_warmup_epochs,
+                classifier_type = cls_head_type,
             )
 
         if grp_cls_heads:
             self.group_classifier = ClassificationHead(
-                dim            = dim_out,
-                head_names     = list(grp_cls_heads),
-                trunk_hidden   = dim_out,
-                adapter_hidden = dim_out,
-                use_prototypes = use_prototypes,
-                residual       = cls_residual,
-                warmup_epochs  = proto_warmup_epochs,
-                group_wise     = True,
+                dim             = dim_out,  # will concat all people: dim -> 3*dim
+                head_names      = list(grp_cls_heads),
+                trunk_hidden    = dim_out,
+                adapter_hidden  = dim_out,
+                use_prototypes  = use_prototypes,
+                residual        = cls_residual,
+                warmup_epochs   = proto_warmup_epochs,
+                group_wise      = True,
+                classifier_type = cls_head_type,
             )
 
     @torch.no_grad()
@@ -602,7 +440,10 @@ class SyntalNet(BaseModel):
             x_feat, m_feat, x_emb, m_emb = batch_data[branch_name.lower()]
             z_branch.append(branch_module(x_feat, m_feat, x_emb, m_emb))
 
-        z = self.mm_fusion(z_branch)
+        if len(self.branches) > 1:
+            z = self.mm_fusion(z_branch)
+        else:
+            z = z_branch[0]
 
         z_outs: Dict[torch.Tensor | Dict[str, torch.Tensor]] = {}
         logits: Dict[str, Dict[str, torch.Tensor]] = {}
@@ -617,394 +458,5 @@ class SyntalNet(BaseModel):
             logits.update({'group': grp_logits})
 
         return z_outs, logits
-
-
-
-
-
-
-
-# import math
-# import torch
-# import torch.nn as nn
-# import torch.nn.functional as F
-# from typing import Optional, Tuple
-
-# class RobustBinaryHead(nn.Module):
-#     """
-#     Robust binary classification head for fused embeddings.
-#     Input:  x ∈ R^{B×D_in}  (e.g., output of GLRFusion)
-#     Output: logits ∈ R^{B×1}
-
-#     Features:
-#       - Pre-norm + small residual MLP (SiLU)
-#       - Cosine classifier (norm-invariant) with learnable scale s
-#       - Optional temperature scaling (learned or set post-hoc)
-#       - Optional logit-prior adjustment for class imbalance
-#     """
-#     def __init__(
-#         self,
-#         dim_in: int,
-#         hidden: Optional[int] = None,
-#         p_drop: float = 0.2,
-#         cosine_scale_init: float = 16.0,      # s
-#         learn_temperature: bool = True,       # learn T jointly, or set post-hoc later
-#         init_temperature: float = 1.0,
-#         use_logit_prior: bool = False,        # set True and call set_class_prior(...)
-#     ):
-#         super().__init__()
-#         H = hidden or max(128, dim_in // 2)
-
-#         # Pre-norm + tiny residual MLP
-#         self.pre = nn.LayerNorm(dim_in)
-#         self.fc1 = nn.Linear(dim_in, H)
-#         self.act = nn.SiLU(inplace=True)
-#         self.drop = nn.Dropout(p_drop)
-#         self.fc2 = nn.Linear(H, dim_in)
-
-#         # Cosine classifier: single weight vector → 1 logit
-#         self.w = nn.Parameter(torch.empty(dim_in))
-#         nn.init.normal_(self.w, std=0.02)
-
-#         # Scale for cosine logit
-#         self.log_s = nn.Parameter(torch.log(torch.tensor(cosine_scale_init)))
-
-#         # Temperature scaling (applied to logits)
-#         self.learn_temperature = learn_temperature
-#         if learn_temperature:
-#             self.log_T = nn.Parameter(torch.log(torch.tensor(init_temperature)))
-#         else:
-#             self.register_buffer("T_buffer", torch.tensor(init_temperature))
-#             self.log_T = None
-
-#         # Optional logit prior (bias) for imbalance
-#         self.use_logit_prior = use_logit_prior
-#         if use_logit_prior:
-#             self.register_buffer("logit_prior", torch.tensor(0.0))
-#         else:
-#             self.register_buffer("logit_prior", torch.tensor(0.0))  # kept for simplicity
-
-#     def forward(self, x: torch.Tensor) -> torch.Tensor:
-#         # Pre-norm + residual MLP
-#         h = self.pre(x)
-#         y = self.fc2(self.drop(self.act(self.fc1(h))))
-#         h = h + y  # residual
-
-#         # Cosine logit
-#         h_norm = F.normalize(h, p=2, dim=1)           # (B,D)
-#         w_norm = F.normalize(self.w, p=2, dim=0)      # (D,)
-#         cos = torch.einsum('bd,d->b', h_norm, w_norm) # (B,)
-#         s = torch.exp(self.log_s).clamp(1.0, 100.0)
-#         logits = s * cos                               # (B,)
-
-#         # Optional prior adjustment (class imbalance)
-#         if self.use_logit_prior:
-#             logits = logits + self.logit_prior
-
-#         # Temperature scaling
-#         T = (torch.exp(self.log_T) if self.log_T is not None else self.T_buffer).clamp(1e-3, 100.0)
-#         logits = logits / T
-
-#         return logits.unsqueeze(-1)  # (B,1)
-
-#     @torch.no_grad()
-#     def set_class_prior(self, pos_fraction: float, strength: float = 1.0):
-#         """
-#         Logit adjustment: add log(pi/(1-pi)) to logits (scaled by 'strength').
-#         Call with validation-set prior or training prior.
-#         """
-#         pi = max(1e-6, min(1.0 - 1e-6, pos_fraction))
-#         self.logit_prior.fill_(strength * math.log(pi / (1.0 - pi)))
-
-#     @torch.no_grad()
-#     def set_temperature(self, T_value: float):
-#         """
-#         If learn_temperature=False, you can still set T post-hoc from calibration.
-#         """
-#         if self.log_T is not None:
-#             self.log_T.data = torch.log(torch.tensor(float(T_value), device=self.w.device))
-#         else:
-#             self.T_buffer.fill_(float(T_value))
-
-
-# # -------- Optional losses you can plug in --------
-
-# def bce_logits_loss(
-#     logits: torch.Tensor, targets: torch.Tensor,
-#     pos_weight: Optional[float] = None,
-#     label_smoothing: float = 0.0,
-#     reduction: str = "mean",
-# ):
-#     """
-#     Standard BCEWithLogits with optional label smoothing and class pos_weight.
-#     targets: {0,1}^(B,1)
-#     """
-#     if label_smoothing > 0:
-#         t = targets.clamp(0,1).float()
-#         eps = label_smoothing
-#         t = t * (1 - eps) + 0.5 * eps
-#     else:
-#         t = targets.float()
-#     return F.binary_cross_entropy_with_logits(
-#         logits, t, reduction=reduction,
-#         pos_weight=None if pos_weight is None else torch.tensor(pos_weight, device=logits.device)
-#     )
-
-# def focal_bce_with_logits(
-#     logits: torch.Tensor, targets: torch.Tensor,
-#     alpha: float = 0.25, gamma: float = 2.0, reduction: str = "mean",
-# ):
-#     """
-#     Focal BCE for class imbalance/noisy labels.
-#     """
-#     p = torch.sigmoid(logits)
-#     t = targets.float()
-#     ce = F.binary_cross_entropy_with_logits(logits, t, reduction='none')
-#     pt = p * t + (1 - p) * (1 - t)  # prob assigned to true class
-#     w = (alpha * t + (1 - alpha) * (1 - t)) * ((1 - pt).clamp_min(1e-6) ** gamma)
-#     loss = w * ce
-#     return loss.mean() if reduction == "mean" else loss.sum()
-
-
-
-
-
-
-# import math
-# import torch
-# import torch.nn as nn
-# import torch.nn.functional as F
-# from typing import Optional
-
-# class RobustTriClassHead(nn.Module):
-#     """
-#     3-class head with:
-#       - PreNorm + tiny residual MLP (SiLU)
-#       - Cosine classifier (norm-invariant) with learnable scale s
-#       - Temperature scaling (learned or post-hoc)
-#       - Optional class-prior logit adjustment (for imbalance)
-#       - Label smoothing support
-#     """
-#     def __init__(
-#         self,
-#         dim_in: int,
-#         num_classes: int = 3,
-#         hidden: Optional[int] = None,
-#         p_drop: float = 0.2,
-#         cosine_scale_init: float = 16.0,
-#         learn_temperature: bool = True,
-#         init_temperature: float = 1.0,
-#         use_logit_prior: bool = False
-#     ):
-#         super().__init__()
-#         assert num_classes >= 3
-#         H = hidden or max(128, dim_in // 2)
-
-#         # Pre-norm + tiny residual MLP
-#         self.pre = nn.LayerNorm(dim_in)
-#         self.fc1 = nn.Linear(dim_in, H)
-#         self.act = nn.SiLU(inplace=True)
-#         self.drop = nn.Dropout(p_drop)
-#         self.fc2 = nn.Linear(H, dim_in)
-
-#         # Cosine classifier weights: W ∈ R^{D×K}
-#         self.W = nn.Parameter(torch.empty(dim_in, num_classes))
-#         nn.init.normal_(self.W, std=0.02)
-
-#         # Scale for cosine logits
-#         self.log_s = nn.Parameter(torch.log(torch.tensor(cosine_scale_init)))
-
-#         # Temperature (log-space)
-#         self.learn_temperature = learn_temperature
-#         if learn_temperature:
-#             self.log_T = nn.Parameter(torch.log(torch.tensor(init_temperature)))
-#         else:
-#             self.register_buffer("T_buffer", torch.tensor(init_temperature))
-#             self.log_T = None
-
-#         # Optional class-prior adjustment
-#         self.use_logit_prior = use_logit_prior
-#         self.register_buffer("logit_prior", torch.zeros(num_classes))
-
-#     def forward(self, x: torch.Tensor, return_probs: bool = False):
-#         # Pre-norm + residual MLP
-#         h = self.pre(x)
-#         y = self.fc2(self.drop(self.act(self.fc1(h))))
-#         h = h + y  # residual
-
-#         # Cosine logits
-#         h = F.normalize(h, p=2, dim=1)                  # (B,D)
-#         W = F.normalize(self.W, p=2, dim=0)             # (D,K)
-#         cos = torch.matmul(h, W)                         # (B,K)
-#         s = torch.exp(self.log_s).clamp(1.0, 100.0)
-#         logits = s * cos                                 # (B,K)
-
-#         if self.use_logit_prior:
-#             logits = logits + self.logit_prior          # broadcast (B,K)
-
-#         T = (torch.exp(self.log_T) if self.log_T is not None else self.T_buffer).clamp(1e-3, 100.0)
-#         logits = logits / T
-
-#         if return_probs:
-#             return logits, F.softmax(logits, dim=-1)
-#         return logits
-
-#     @torch.no_grad()
-#     def set_class_priors(self, priors: torch.Tensor, strength: float = 1.0):
-#         """
-#         priors: shape (K,), sum to 1. Adds strength * log(pi_k) to logits.
-#         """
-#         pi = priors.clamp_min(1e-6)
-#         self.logit_prior.copy_(strength * torch.log(pi))
-
-# Loss helpers
-def xe_with_label_smoothing(logits: torch.Tensor, targets: torch.Tensor, smoothing: float = 0.05):
-    """
-    targets: int64 class indices, shape (B,)
-    """
-    if smoothing <= 0:
-        return F.cross_entropy(logits, targets)
-    n_classes = logits.size(-1)
-    with torch.no_grad():
-        true_dist = torch.zeros_like(logits).fill_(smoothing / (n_classes - 1))
-        true_dist.scatter_(1, targets.unsqueeze(1), 1.0 - smoothing)
-    logp = F.log_softmax(logits, dim=-1)
-    return torch.mean(torch.sum(-true_dist * logp, dim=-1))
-
-
-
-
-
-
-
-# class RobustTriClassHead(nn.Module):
-#     """
-#     Cosine classifier + EMA prototypes + learnable logit fusion.
-#     Use: logits, aux = head(z, y=labels)   # y optional; required only if you call update_prototypes(...)
-#     """
-#     def __init__(self, dim_in: int, num_classes: int = 3,
-#                  p_drop: float = 0.2,
-#                  use_prototypes: bool = True,
-#                  proto_momentum: float = 0.99,
-#                  init_scale: float = 10.0,
-#                  init_scale_proto: float = 10.0,
-#                  fuse_init: float = -1.5  # sigmoid -> ~0.18
-#                  ):
-#         super().__init__()
-#         self.C = num_classes
-#         self.D = dim_in
-#         self.use_prototypes = use_prototypes
-#         self.m = proto_momentum
-
-#         # Linear cosine classifier (weights are learnable, normalized on the fly)
-#         self.W = nn.Parameter(torch.randn(self.C, self.D) * 0.02)
-#         self.log_scale = nn.Parameter(torch.log(torch.tensor(init_scale)))
-
-#         # Prototype branch (buffers, updated via EMA)
-#         if self.use_prototypes:
-#             self.register_buffer("prototypes", F.normalize(torch.randn(self.C, self.D), dim=1))
-#             self.register_buffer("proto_counts", torch.zeros(self.C))  # for warmup masking
-#             self.log_scale_proto = nn.Parameter(torch.log(torch.tensor(init_scale_proto)))
-#             self.fuse_logit = nn.Parameter(torch.tensor(fuse_init))  # sigmoid->lambda in [0,1]
-
-#         self.dropout = nn.Dropout(p_drop)
-
-#     @staticmethod
-#     def _cos_logits(z, W, scale):
-#         # z: (B,D), W: (C,D)
-#         z = F.normalize(z, dim=1)
-#         W = F.normalize(W, dim=1)
-#         return scale * (z @ W.t())  # (B,C)
-
-#     @torch.no_grad()
-#     def update_prototypes(self, z: torch.Tensor, y: torch.Tensor):
-#         """
-#         Update EMA prototypes using CURRENT minibatch embeddings (already from head input).
-#         Call this in training loop after forward(), before loss.backward().
-#         """
-#         if not self.use_prototypes:
-#             return
-#         z = F.normalize(z, dim=1)
-#         for c in range(self.C):
-#             idx = (y == c)
-#             if idx.any():
-#                 batch_mean = z[idx].mean(dim=0)
-#                 self.prototypes[c] = F.normalize(self.m * self.prototypes[c] + (1 - self.m) * batch_mean, dim=0)
-#                 self.proto_counts[c] += idx.sum()
-
-#     def forward(self, z: torch.Tensor, y: torch.Tensor | None = None):
-#         # z: (B, D)
-#         z = self.dropout(z)
-
-#         s = self.log_scale.exp()
-#         logits_lin = self._cos_logits(z, self.W, s)  # (B,C)
-
-#         aux = {"scale": float(s.detach().cpu())}
-
-#         if not self.use_prototypes:
-#             return logits_lin, aux
-
-#         sp = self.log_scale_proto.exp()
-#         logits_proto = self._cos_logits(z, self.prototypes, sp)
-
-#         # Mask proto logits for classes never seen yet (counts==0) to avoid garbage early on
-#         seen = (self.proto_counts > 0).float()  # (C,)
-#         if (seen == 0).any():
-#             mask = seen.unsqueeze(0)  # (1,C)
-#             logits_proto = logits_proto * mask + logits_lin * (1 - mask)
-
-#         lam = torch.sigmoid(self.fuse_logit)  # (scalar in 0..1)
-#         logits = (1 - lam) * logits_lin + lam * logits_proto
-
-#         aux.update({
-#             "scale_proto": float(sp.detach().cpu()),
-#             "lambda": float(lam.detach().cpu())
-#         })
-#         return logits, aux
-
-
-# -------- Losses --------
-
-class LabelSmoothingCE(nn.Module):
-    def __init__(self, num_classes: int, eps: float = 0.05, weight: torch.Tensor | None = None):
-        super().__init__()
-        self.C = num_classes
-        self.eps = eps
-        self.register_buffer("weight", weight if weight is not None else None)
-
-    def forward(self, logits: torch.Tensor, target: torch.Tensor):
-        logp = F.log_softmax(logits, dim=1)
-        with torch.no_grad():
-            true_dist = torch.zeros_like(logp)
-            true_dist.fill_(self.eps / (self.C - 1))
-            true_dist.scatter_(1, target.unsqueeze(1), 1 - self.eps)
-        if self.weight is not None:
-            loss = -(true_dist * logp) * self.weight.unsqueeze(0)
-            return loss.sum(dim=1).mean()
-        return -(true_dist * logp).sum(dim=1).mean()
-
-
-class ClassBalancedFocal(nn.Module):
-    """
-    Class-balanced focal loss (Cui et al.), good for imbalance.
-    Provide counts via 'counts' tensor of shape (C,)
-    """
-    def __init__(self, counts: torch.Tensor, beta: float = 0.999, gamma: float = 2.0):
-        super().__init__()
-        C = counts.numel()
-        effective_num = 1.0 - counts.float().clamp_min(1) * (1 - beta)
-        weights = (1 - beta) / effective_num
-        weights = weights / weights.sum() * C
-        self.register_buffer("alpha", weights)  # (C,)
-        self.gamma = gamma
-
-    def forward(self, logits: torch.Tensor, target: torch.Tensor):
-        logp = F.log_softmax(logits, dim=1)
-        p = logp.exp()
-        pt = p.gather(1, target.unsqueeze(1)).squeeze(1)
-        w = self.alpha.gather(0, target)
-        focal = ((1 - pt) ** self.gamma) * (-logp.gather(1, target.unsqueeze(1)).squeeze(1))
-        return (w * focal).mean()
-
 
 

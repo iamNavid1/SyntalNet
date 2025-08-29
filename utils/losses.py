@@ -110,3 +110,41 @@ class ClassBalancedFocalLoss(BaseLoss):
 
         else:
             raise ValueError(f"Unknown mode: {self.mode!r}")
+
+
+class ClassBalancedCELoss(BaseLoss):
+    """Class-balanced cross entropy with optional label smoothing."""
+    def __init__(self, counts: torch.Tensor, beta: float = 0.9999, smoothing: float = 0.0):
+        super().__init__()
+        counts = counts.float().clamp_min(1)
+        effective_num = 1.0 - beta ** counts
+        weights = (1.0 - beta) / effective_num
+        weights = weights / weights.sum() * counts.numel()
+        self.register_buffer("alpha", weights)
+        self.smoothing = float(smoothing)
+        self.num_classes = int(counts.numel())
+
+    def _one_hot(self, target: torch.Tensor) -> torch.Tensor:
+        # [N] -> [N, C]
+        return F.one_hot(target, num_classes=self.num_classes).to(dtype=torch.float32, device=target.device)
+
+    def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        assert logits.dim() == 2 and logits.size(1) == self.num_classes
+        assert target.dim() == 1 and target.size(0) == logits.size(0)
+        
+        N, C = logits.shape
+
+        if self.smoothing > 0.0 and self.num_classes > 1:
+            eps = self.smoothing
+            label_one_hot = self._one_hot(target)
+            label_one_hot = label_one_hot * (1 - eps) + eps / (C - 1) * (1 - label_one_hot)
+            logp = F.log_softmax(logits, dim=1)
+            per_example = -(label_one_hot * logp).sum(dim=1)
+            w = self.alpha.gather(0, target)
+            loss = per_example * w
+            return loss.mean()
+
+        return F.cross_entropy(logits, target, weight=self.alpha, reduction='mean')
+
+
+        

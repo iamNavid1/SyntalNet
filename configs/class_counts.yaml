@@ -1,0 +1,35 @@
+label:
+  individual:
+    Engagement: [2006, 6078, 1996]
+    Lead:       [2268, 5494, 2318]
+  group:
+    Synchrony:  [931, 1505, 924]
+    Confidence: [1025, 1354, 981]
+    Transition: [961, 1401, 998]
+
+kernel:
+  individual:
+    Engagement: [1431, 7178, 1472]
+    Lead:       [1613, 6844, 1623]
+  group:
+    Synchrony:  [494, 2332, 534]
+    Confidence: [615, 2117, 628]
+    Transition: [659, 1995, 706]
+
+ema:
+  individual:
+    Engagement: [1310, 7419, 1351]
+    Lead:       [1542, 6945, 1593]
+  group:
+    Synchrony:  [470, 2396, 494]
+    Confidence: [578, 2177, 605]
+    Transition: [615, 2090, 655]
+
+kalman:
+  individual:
+    Engagement: [202, 9606, 272]
+    Lead:       [121, 9798, 161]
+  group:
+    Synchrony:  [84, 3179, 97]
+    Confidence: [94, 3155, 111]
+    Transition: [84, 3138, 138]

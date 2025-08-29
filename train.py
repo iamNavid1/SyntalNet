@@ -4,6 +4,7 @@ import re
 import os
 import yaml
 import glob
+import math
 import json
 import random
 import argparse
@@ -229,11 +230,12 @@ def run_training(cfg, args, device, local_rank, distributed, logger, writer):
     optimizer = build_optimizer(model, cfg)
 
     accum = max(1, cfg["training"].get("accum_steps", 1))
-    total_steps = len(train_loader) * cfg["training"]["epochs"] // accum
+    total_steps = math.ceil(len(train_loader) / accum) * cfg["training"]["epochs"]
     scheduler_cfg = {
-        "warmup_steps": cfg["training"].get("warmup_steps", 0),
-        "max_steps": total_steps,
-        "min_lr": cfg["training"].get("min_lr", 0.0),
+        "warmup_steps" : int(cfg["training"].get("warmup_ratio", 0) * total_steps),
+        "max_steps"    : total_steps,
+        "min_lr"       : cfg["training"].get("min_lr", 0.0),
+        "type"         : cfg["training"].get("scheduler", "warmup_cosine"),
     }
     scheduler = build_scheduler(optimizer, scheduler_cfg)
 
@@ -374,11 +376,12 @@ def run_logo_cv(cfg, args, device, local_rank, distributed, base_logger, base_wr
         optimizer = build_optimizer(model, cfg)
 
         accum = max(1, cfg["training"].get("accum_steps", 1))
-        total_steps = len(train_loader) * cfg["training"]["epochs"] // accum
+        total_steps = math.ceil(len(train_loader) / accum) * cfg["training"]["epochs"]
         scheduler_cfg = {
-            "warmup_steps": cfg["training"].get("warmup_steps", 0),
-            "max_steps": total_steps,
-            "min_lr": cfg["training"].get("min_lr", 0.0),
+            "warmup_steps" : int(cfg["training"].get("warmup_ratio", 0) * total_steps),
+            "max_steps"    : total_steps,
+            "min_lr"       : cfg["training"].get("min_lr", 0.0),
+            "type"         : cfg["training"].get("scheduler", ""),
         }
         scheduler = build_scheduler(optimizer, scheduler_cfg)
 

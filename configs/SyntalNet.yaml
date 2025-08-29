@@ -1,40 +1,39 @@
 model:
   name: SyntalNet
   args: {
-    ind_cls_heads: ["Engagement", "Lead"]
+    ind_cls_heads: ["Engagement", "Lead"],
+    use_emb: True,
+    use_feat: True,
+    cls_head_type: "cosine",
   }
 
 dataset:
   args:
-    root_dir: "./dataset/processed"
+    root_dir: "./dataset"
     modalities: ["face", "pose", "video", "turns", "utterance", "sentiment", "prosody", "audio",]
+    label_type: "kernel"
   split:
     mode: "item"  # "item" or "group" based split
     ratio: 0.2    # train-val split ratio
     groups: []    # groups to hold out for val
     seed: 17
   stats_dir: "./configs/normalization_stats.yaml"
-  class_counts:
-    individual:
-      Engagement: [2006, 6078, 1996]
-      Lead:       [2268, 5494, 2318]
-    group:
-      Synchrony:  [931, 1505, 924]
-      Confidence: [1025, 1354, 981]
-      Transition: [961, 1401, 998]
+  cls_count_dir: "./configs/class_counts.yaml"
 
 training:
   seed: 42
   num_workers: 4
   epochs: 100
-  batch_size: 8
-  val_batch_size: 8
+  batch_size: 12
+  val_batch_size: 12
   learning_rate: 3.e-4
+  min_lr: 1.e-5
+  warmup_ratio: 0.08
   weight_decay: 1.e-4
-  warmup_steps: 1000
-  min_lr: 1.e-6
+  scheduler: "cosine_decay"  # cosine_decay | one_cycle
   grad_clip: 1.0
-  accum_steps: 4
+  accum_steps: 3
+  loss_type: "focal"
   amp: False
   cb_beta: 0.999
   focal_gamma: 2.0
@@ -43,5 +42,5 @@ training:
   ckpt_interval: 10
 
 logging:
-  log_dir: ./logs
-  checkpoint_dir: ./checkpoints
+  log_dir: ./logs/test
+  checkpoint_dir: ./checkpoints/test

@@ -28,12 +28,12 @@ COLUMNS_TO_KEEP = {
         'jitter_percent', 'shimmer_dB', 'percent_silence'
     ],
     'individual_labels': [
-        ['Q4_L_label', 'Q5_L_label'],
-        ['Q4_M_label', 'Q5_M_label'], 
-        ['Q4_R_label', 'Q5_R_label']
+        ['Q4_L_{type}', 'Q5_L_{type}'],
+        ['Q4_M_{type}', 'Q5_M_{type}'], 
+        ['Q4_R_{type}', 'Q5_R_{type}']
     ],
     'group_labels': [
-        'Q1_label', 'Q2_label', 'Q3_label',
+        'Q1_{type}', 'Q2_{type}', 'Q3_{type}',
     ]
 }
 
@@ -47,9 +47,10 @@ class GroupDynamicsDataset(Dataset):
         self,
         root_dir:       str,
         modalities:     List[str],
-        snippet_length: int                 = 10,  # sec
-        stride:         int                 = 3,   # sec
-        resample_freq:  int                 = 10,  # hz
+        snippet_length: int                 = 10,       # sec
+        stride:         int                 = 3,        # sec
+        resample_freq:  int                 = 10,       # hz
+        label_type:     str                 = 'label',  # label | ema | kernel | kalman
         transforms:     Optional[Any]       = None,
         include_groups: Optional[List[int]] = None,
         exclude_groups: Optional[List[int]] = None,
@@ -60,6 +61,7 @@ class GroupDynamicsDataset(Dataset):
         self.stride = stride
         self.len_overlap = snippet_length % stride
         self.resample_freq = resample_freq
+        self.label_type = label_type
         self.transforms = transforms
 
         # File-level caches
@@ -68,10 +70,8 @@ class GroupDynamicsDataset(Dataset):
         self._npy_cache: OrderedDict[str, np.ndarray] = OrderedDict()
 
         # Scan for group IDs
-        example_mod = modalities[0]
-        pattern_csv = os.path.join(root_dir, example_mod, "Group_*.csv")
-        pattern_json = os.path.join(root_dir, example_mod, "Group_*.json")
-        files = glob.glob(pattern_csv) + glob.glob(pattern_json)
+        pattern = os.path.join(root_dir, "face", "Group_*.csv")
+        files = glob.glob(pattern)
         group_ids = set()
         for f in files:
             base = os.path.basename(f)
@@ -89,23 +89,14 @@ class GroupDynamicsDataset(Dataset):
         self.samples = []  # each entry: { 'group': int, 'start_time': float }
         for gid in self.group_ids:
             person_timestamps = {}  # per-person timestamps
-            csv_path = os.path.join(root_dir, example_mod, f"Group_{gid:02}.csv")
-            json_path = os.path.join(root_dir, example_mod, f"Group_{gid:02}.json")
+            csv_path = os.path.join(root_dir, "face", f"Group_{gid:02}.csv")
 
             if os.path.exists(csv_path):
                 df = self._load_csv(csv_path)
                 for pid in range(3):
                     person_timestamps[pid] = df[df['face_id'] == pid+1]['timestamp'].values
-
-            elif os.path.exists(json_path):
-                frames = self._load_json(json_path)
-                for pid in range(3):
-                    person_timestamps[pid] = np.array([
-                        frame[pid]['timestamp'] for frame in frames
-                    ])
-
             else:
-                raise FileNotFoundError(f"No CSV or JSON found for group {gid} in modality {example_mod}")
+                raise FileNotFoundError(f"No CSV found for group {gid} in modality: face")
 
             t0 = max([ts[0] for ts in person_timestamps.values() if len(ts) > 0])
             tN = min([ts[-1] for ts in person_timestamps.values() if len(ts) > 0])
@@ -402,7 +393,7 @@ class GroupDynamicsDataset(Dataset):
                 raise ValueError(f"Unknown modality: {mod}")
 
         # Load and process labels for individual and group data
-        csv_path = os.path.join(self.root_dir, f"labels/annotation_summary_majority_vote.csv")
+        csv_path = os.path.join(self.root_dir, f"labels/annotation_summary.csv")
         labels_df = self._load_csv(csv_path)
 
         clip_i = t0 // self.stride
@@ -420,6 +411,7 @@ class GroupDynamicsDataset(Dataset):
         if not row_i.empty and not row_j.empty:
             for p_idx, person in enumerate(COLUMNS_TO_KEEP['individual_labels']):
                 for l_idx, label in enumerate(person):
+                    label = label.format(type=self.label_type)
                     value_i = row_i[label].iloc[0]
                     value_j = row_j[label].iloc[0]
                     if value_j < value_i:
@@ -436,6 +428,7 @@ class GroupDynamicsDataset(Dataset):
         group_labels = np.full(3, -1, dtype=np.int64)
         if not row_i.empty and not row_j.empty:
             for l_idx, label in enumerate(COLUMNS_TO_KEEP['group_labels']):
+                label = label.format(type=self.label_type)
                 value_i = row_i[label].iloc[0]
                 value_j = row_j[label].iloc[0]
                 if value_j < value_i:

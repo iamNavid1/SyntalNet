@@ -4,6 +4,35 @@ import torch.nn.functional as F
 from torch.nn.modules.utils import _pair, _triple
 from typing import Tuple, Sequence, Union
 
+
+class MLP(nn.Module):
+    def __init__(
+            self,
+            in_features: int,
+            hidden_features: int = None,
+            out_features: int = None,
+            p_drop: float = 0.2,
+            act_layer: nn.Module = nn.GELU,
+    ):
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or max(64, in_features // 2)
+
+        self.ln = nn.LayerNorm(in_features)
+        self.fc1 = nn.Linear(in_features, hidden_features)
+        self.act = act_layer()
+        self.drop1 = nn.Dropout(p_drop)
+        self.fc2 = nn.Linear(hidden_features, out_features)
+
+    def forward(self, x):
+        x = self.ln(x)
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.drop1(x)
+        x = self.fc2(x)
+        return x
+
+
 class ChannelLayerNorm2d(nn.Module):
     """
     LayerNorm over channels for 4D tensors (B, C, T, F).
@@ -24,6 +53,7 @@ def _normalize_out_channels(v: Union[int, Tuple[int, int, int]]) -> Tuple[int, i
     if not all(isinstance(x, int) for x in trip):
         raise ValueError("out_channels must resolve to a 3-tuple of ints.")
     return trip  # type: ignore[return-value]
+
 
 def _normalize_in_channels(
     v: Union[int, Tuple[int, int, int]],
