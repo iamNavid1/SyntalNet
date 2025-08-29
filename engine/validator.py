@@ -172,19 +172,16 @@ class Validator:
             lbl = labels_tensor.view(B * P, L)
         else:  # group shape (B, L)
             lbl = labels_tensor
+        prob_metrics = {"auroc_macro", "auprc_macro", "auprc_per_class", "ece"}
         for idx, (name, lg) in enumerate(logits_split.items()):
             y = lbl[:, idx]
             probs = torch.softmax(lg, dim=-1)
             metrics = metric_sets_split[name]
-            metrics["accuracy"].update(lg, y)
-            metrics["f1_macro"].update(lg, y)
-            metrics["f1"].update(lg, y)
-            metrics["precision_macro"].update(lg, y)
-            metrics["auroc_ovr"].update(probs, y)
-            metrics["auprc_macro"].update(probs, y)
-            metrics["ece"].update(probs, y)
-            if "confusion_matrix" in metrics:
-                metrics["confusion_matrix"].update(lg, y)
+            for mname, m in metrics.items():
+                if mname in prob_metrics:
+                    m.update(probs, y)
+                else:
+                    m.update(lg, y)
 
     # --------------------------- Results computation ---------------------------
 
@@ -202,23 +199,21 @@ class Validator:
         gathered: Dict[str, Dict[str, tuple]],
     ):
         results: Dict[str, Dict[str, Dict[str, Union[float, np.ndarray]]]] = {}
+        prob_metrics = {"auroc_macro", "auprc_macro", "auprc_per_class", "ece"}
         for split, heads in head_specs.items():
             results[split] = {}
             for name, K in heads.items():
                 lg, y = gathered[split][name]
                 lg = lg.float()
+                y = y.long()
                 metrics = build_classification_metrics(K)  # on cpu
                 if lg.numel() > 0:
                     probs = torch.softmax(lg, dim=-1)
-                    metrics["accuracy"].update(lg, y)
-                    metrics["f1_macro"].update(lg, y)
-                    metrics["f1"].update(lg, y)
-                    metrics["precision_macro"].update(lg, y)
-                    metrics["auroc_ovr"].update(probs, y)
-                    metrics["auprc_macro"].update(probs, y)
-                    metrics["ece"].update(probs, y)
-                    if "confusion_matrix" in metrics:
-                        metrics["confusion_matrix"].update(lg, y)
+                    for mname, m in metrics.items():
+                        if mname in prob_metrics:
+                            m.update(probs, y)
+                        else:
+                            m.update(lg, y)
                 results[split][name] = compute_metrics(metrics)
         return results
 

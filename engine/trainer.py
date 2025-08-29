@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import yaml
 import contextlib
+import numpy as np
 from collections import defaultdict
 from typing import Dict, Optional
 
@@ -117,13 +118,19 @@ class Trainer:
                     continue
                 for head_name, res in heads.items():
                     for k, v in res.items():
+                        tag = f"val/{group_name}_{head_name}_{k}"
                         if k == "confusion_matrix":
                             cm = torch.as_tensor(v, dtype=torch.float32)
                             cm = (cm - cm.min()) / (cm.max() - cm.min() + 1e-8)
                             cm = torch.nn.functional.interpolate(cm[None, None], size=(256, 256), mode="nearest")[0, 0]
-                            self.writer.add_image(f"val/{group_name}_{head_name}_{k}", cm, self.global_step, dataformats="HW")
+                            self.writer.add_image(tag, cm, self.global_step, dataformats="HW")
+                        elif isinstance(v, (list, tuple, np.ndarray)) and np.size(v) > 1:
+                            vals = v if isinstance(v, (list, tuple)) else v.tolist()
+                            for i, vi in enumerate(vals):
+                                self.writer.add_scalar(f"{tag}/class_{i+1}", float(vi), self.global_step)
                         else:
-                            self.writer.add_scalar(f"val/{group_name}_{head_name}_{k}", v, self.global_step)
+                            self.writer.add_scalar(tag, float(np.array(v).squeeze()), self.global_step)
+
         return results, val_loss
 
 
