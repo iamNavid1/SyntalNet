@@ -45,8 +45,8 @@ class Trainer:
         self.start_epoch = start_epoch
         self.global_step = 0
 
-        self.grad_clip = cfg.get("grad_clip", 0.0)
-        self.accum_steps = cfg.get("accum_steps", 1)
+        self.grad_clip = cfg.get("training").get("grad_clip", 0.0)
+        self.accum_steps = cfg.get("training").get("accum_steps", 1)
 
         self.autocast_kwargs = BuildAutocastKWargs(cfg, device)
         self.scaler = self._build_grad_scaler()
@@ -81,7 +81,7 @@ class Trainer:
 
             val_loss = None
             if self.val_loader is not None and (epoch + 1) % validate_interval == 0:
-                metrics, val_loss = self.validate()
+                metrics, val_loss = self.validate(epoch)
                 self.logger.info(f"Validation @ epoch {epoch+1}: {format_metrics(metrics)}")
 
             save_best = False
@@ -104,7 +104,7 @@ class Trainer:
         self.close()
 
 
-    def validate(self):
+    def validate(self, epoch: int):
         if self.val_loader is None:
             return {}, None
         results, val_loss = self.validator(self.model, self.val_loader, self._compute_loss)
@@ -112,7 +112,7 @@ class Trainer:
             results["loss"] = val_loss
         if self._is_main():
             if val_loss is not None:
-                self.writer.add_scalar("val/loss", val_loss, self.global_step)
+                self.writer.add_scalar("val/loss", val_loss, epoch+1)
             for group_name, heads in results.items():
                 if group_name == "loss":
                     continue
@@ -123,13 +123,13 @@ class Trainer:
                             cm = torch.as_tensor(v, dtype=torch.float32)
                             cm = (cm - cm.min()) / (cm.max() - cm.min() + 1e-8)
                             cm = torch.nn.functional.interpolate(cm[None, None], size=(256, 256), mode="nearest")[0, 0]
-                            self.writer.add_image(tag, cm, self.global_step, dataformats="HW")
+                            self.writer.add_image(tag, cm, epoch+1, dataformats="HW")
                         elif isinstance(v, (list, tuple, np.ndarray)) and np.size(v) > 1:
                             vals = v if isinstance(v, (list, tuple)) else v.tolist()
                             for i, vi in enumerate(vals):
-                                self.writer.add_scalar(f"{tag}/class_{i+1}", float(vi), self.global_step)
+                                self.writer.add_scalar(f"{tag}/class_{i+1}", float(vi), epoch+1)
                         else:
-                            self.writer.add_scalar(tag, float(np.array(v).squeeze()), self.global_step)
+                            self.writer.add_scalar(tag, float(np.array(v).squeeze()), epoch+1)
 
         return results, val_loss
 
@@ -165,6 +165,9 @@ class Trainer:
     def _train_one_epoch(self, epoch: int):
         self.model.train()
         running_loss = 0.0
+        running_count = 0
+        interval_loss = 0.0
+        interval_count = 0
         steps = 0
         is_ddp = hasattr(self.model, "no_sync")
 
@@ -192,17 +195,43 @@ class Trainer:
             if do_sync:
                 self._optimizer_step()
 
-            running_loss += loss.item()
-            if self._is_main() and (step + 1) % 10 == 0:
-                avg_loss = running_loss / (step + 1)
-                self.logger.info(f"Epoch {epoch+1} Step {step+1}/{len(self.train_loader)} Loss {avg_loss:.4f}")
-                self.writer.add_scalar("train/loss", avg_loss, self.global_step)
+            batch_size = batch_labels.get("group", batch_labels.get("individual")).shape[0]
+            loss_val = loss.item() * batch_size
+            count_val = batch_size
+            if torch.distributed.is_initialized():
+                tensor = torch.tensor([loss_val, count_val], device=self.device)
+                torch.distributed.all_reduce(tensor, op=torch.distributed.ReduceOp.SUM)
+                loss_val, count_val = tensor.tolist()
+            running_loss += loss_val
+            running_count += count_val
+            interval_loss += loss_val
+            interval_count += count_val
+            if self._is_main() and (step + 1) % 10 == 0 and interval_count > 0:
+                avg_loss = interval_loss / interval_count
+                self.logger.info(
+                    f"Epoch {epoch+1} Step {step+1}/{len(self.train_loader)} Loss {avg_loss:.4f}"
+                )
+                self.writer.add_scalar("train/loss_step", avg_loss, self.global_step+1)
                 for i, pg in enumerate(self.optimizer.param_groups):
-                    self.writer.add_scalar(f"train/lr_group{i}", pg.get("lr", 0.0), self.global_step)
+                    self.writer.add_scalar(f"train/lr_group{i}", pg.get("lr", 0.0), self.global_step+1)
+                interval_loss = 0.0
+                interval_count = 0
             self.global_step += 1
 
         if steps > 0 and (steps % self.accum_steps != 0):  # tail microbatch
             self._optimizer_step()
+
+        if interval_count > 0 and self._is_main():
+            avg_loss = interval_loss / interval_count
+            self.logger.info(
+                f"Epoch {epoch+1} Step {steps}/{len(self.train_loader)} Loss {avg_loss:.4f}"
+            )
+            self.writer.add_scalar("train/loss_step", avg_loss, self.global_step+1)
+
+        if running_count > 0 and self._is_main():
+            epoch_loss = running_loss / running_count
+            self.logger.info(f"Epoch {epoch+1} Training Loss {epoch_loss:.4f}")
+            self.writer.add_scalar("train/loss", epoch_loss, epoch+1)
 
 
     def _prepare_label_views(self, labels: Dict[str, torch.Tensor]):

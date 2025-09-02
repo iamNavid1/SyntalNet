@@ -42,5 +42,5 @@ training:
   ckpt_interval: 10
 
 logging:
-  log_dir: ./logs/test
-  checkpoint_dir: ./checkpoints/test
+  log_dir: ./logs/4_kernel
+  checkpoint_dir: ./checkpoints/4_kernel

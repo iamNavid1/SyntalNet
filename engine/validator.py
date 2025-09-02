@@ -53,8 +53,9 @@ class Validator:
                 if loss_fn is not None:
                     ind_label, grp_label = self._prepare_label_views(batch_labels)
                     loss = loss_fn(logits, ind_label, grp_label)
-                    total_loss += float(loss.item())
-                    count += 1
+                    batch_size = batch_labels.get("group", batch_labels.get("individual")).shape[0]
+                    total_loss += float(loss.item()) * batch_size
+                    count += batch_size
 
             if ddp_eval:
                 for k in ("individual", "group"):
