@@ -80,7 +80,7 @@ class ClassBalancedFocalLoss(BaseLoss):
             else:
                 modulator = torch.exp(
                     -self.gamma * labels_one_hot * logits
-                    - self.gamma * torch.log(1 + torch.exp(-logits))
+                    - self.gamma * F.softplus(-logits)
                 )
 
             loss = modulator * bce            # [N, C]

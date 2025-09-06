@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import yaml
+import math
 import contextlib
 import numpy as np
 from collections import defaultdict
@@ -44,9 +45,11 @@ class Trainer:
         self.world_size = world_size
         self.start_epoch = start_epoch
         self.global_step = 0
+        self.optim_step: int = 0
 
         self.grad_clip = cfg.get("training").get("grad_clip", 0.0)
         self.accum_steps = cfg.get("training").get("accum_steps", 1)
+        self.grad_log_interval = cfg.get("training").get("grad_log_interval", 100)
 
         self.autocast_kwargs = BuildAutocastKWargs(cfg, device)
         self.scaler = self._build_grad_scaler()
@@ -289,13 +292,19 @@ class Trainer:
 
     def _optimizer_step(self):
         self.scaler.unscale_(self.optimizer)
+        step_opt = self.optim_step + 1
+        if self._is_main() and self.writer is not None:
+            self._maybe_log_gradients(step_opt)
         if self.grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+            clip_val = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+            if self._is_main() and self.writer is not None:
+                self.writer.add_scalar("grad/clip_norm", float(clip_val), step_opt)
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self.optimizer.zero_grad(set_to_none=True)
         if self.scheduler is not None:
             self.scheduler.step()
+        self.optim_step += 1
 
 
     def _build_grad_scaler(self) -> GradScaler:
@@ -351,4 +360,56 @@ class Trainer:
         if self.writer is not None:
             self.writer.close()
 
+
+    def _maybe_log_gradients(self, step_opt: int) -> None:
+        if self.grad_log_interval <= 0:
+            return
+        if step_opt % self.grad_log_interval != 0:
+            return
+
+        def _grad_group_key(param_name: str) -> str:
+            parts = param_name.split(".")
+            if parts and parts[0] == "module":  # DDP
+                parts = parts[1:]
+            if not parts:
+                return "unknown"
+            if parts[0] == "branches" and len(parts) >= 2:
+                return f"branches.{parts[1]}"
+            return parts[0]
+
+        stats = defaultdict(lambda: {"sum_abs": 0.0, "sum_sq": 0.0, "count": 0, "max_abs": 0.0, "grad_bufs": []})
+        global_sq = 0.0
+
+        with torch.no_grad():
+            for name, param in self.model.named_parameters():
+                grad = param.grad
+                if grad is None:
+                    continue
+
+                g = grad.detach()
+                sq = (g * g).sum().item()
+                global_sq += sq
+
+                module = _grad_group_key(name)
+                s = stats[module]
+
+                abs_g = g.abs()
+                s["sum_abs"] += abs_g.sum().item()
+                s["sum_sq"]  += sq
+                s["count"]   += g.numel()
+                s["max_abs"] = max(s["max_abs"], abs_g.max().item())
+                s["grad_bufs"].append(g.view(-1).cpu())
+            
+        self.writer.add_scalar("grad/global_l2_norm", math.sqrt(global_sq), step_opt)
+
+        for module, s in stats.items():
+            if s["count"] == 0:
+                continue
+            mean_abs = s["sum_abs"] / s["count"]
+            l2_norm  = math.sqrt(s["sum_sq"])
+
+            self.writer.add_scalar(f"grad/{module}/mean_abs", mean_abs, step_opt)
+            self.writer.add_scalar(f"grad/{module}/l2_norm",  l2_norm,  step_opt)
+            self.writer.add_scalar(f"grad/{module}/max_abs",  s["max_abs"], step_opt)
+            self.writer.add_histogram(f"grad/{module}/hist", torch.cat(s["grad_bufs"], dim=0), step_opt)
 

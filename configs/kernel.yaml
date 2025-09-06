@@ -5,13 +5,14 @@ model:
     use_emb: True,
     use_feat: True,
     cls_head_type: "cosine",
+    proto_warmup_epochs: 10
   }
 
 dataset:
   args:
     root_dir: "./dataset"
     modalities: ["face", "pose", "video", "turns", "utterance", "sentiment", "prosody", "audio",]
-    label_type: "kernel"
+    label_type: "label"
   split:
     mode: "item"  # "item" or "group" based split
     ratio: 0.2    # train-val split ratio
@@ -23,7 +24,7 @@ dataset:
 training:
   seed: 42
   num_workers: 4
-  epochs: 100
+  epochs: 200
   batch_size: 12
   val_batch_size: 12
   learning_rate: 3.e-4
@@ -31,16 +32,17 @@ training:
   warmup_ratio: 0.08
   weight_decay: 1.e-4
   scheduler: "cosine_decay"  # cosine_decay | one_cycle
-  grad_clip: 1.0
+  grad_clip: 5.0
   accum_steps: 3
+  grad_log_interval: 37
   loss_type: "focal"
   amp: False
-  cb_beta: 0.999
-  focal_gamma: 2.0
+  cb_beta: 0.9995
+  focal_gamma: 2.5
   label_smoothing: 0.05
-  val_interval: 1
+  val_interval: 4
   ckpt_interval: 10
 
 logging:
-  log_dir: ./logs/4_kernel
-  checkpoint_dir: ./checkpoints/4_kernel
+  log_dir: ./logs/8_label
+  checkpoint_dir: ./checkpoints/8_label

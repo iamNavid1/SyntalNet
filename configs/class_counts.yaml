@@ -1,44 +1,44 @@
 label:
   individual:
-    Engagement: [2006, 6078, 1996]
-    Lead:       [2268, 5494, 2318]
+    Engagement: [2234, 5581, 2265]
+    Lead:       [2630, 4802, 2648]
   group:
-    Synchrony:  [931, 1505, 924]
-    Confidence: [1025, 1354, 981]
-    Transition: [961, 1401, 998]
+    Synchrony:  [987, 1394, 979]
+    Confidence: [1052, 1252, 1056]
+    Transition: [1007, 1295, 1058]
 
 kernel:
   individual:
-    Engagement: [1431, 7178, 1472]
-    Lead:       [1613, 6844, 1623]
+    Engagement: [1430, 7183, 1467]
+    Lead:       [1610, 6847, 1623]
   group:
-    Synchrony:  [494, 2332, 534]
-    Confidence: [615, 2117, 628]
-    Transition: [659, 1995, 706]
+    Synchrony:  [489, 2336, 535]
+    Confidence: [612, 2120, 628]
+    Transition: [662, 1993, 705]
 
 ema:
   individual:
-    Engagement: [1310, 7419, 1351]
-    Lead:       [1542, 6945, 1593]
+    Engagement: [1303, 7420, 1357]
+    Lead:       [1539, 6943, 1598]
   group:
-    Synchrony:  [470, 2396, 494]
-    Confidence: [578, 2177, 605]
-    Transition: [615, 2090, 655]
+    Synchrony:  [471, 2396, 493]
+    Confidence: [575, 2181, 604]
+    Transition: [617, 2091, 652]
 
 kalman:
   individual:
-    Engagement: [202, 9606, 272]
-    Lead:       [121, 9798, 161]
+    Engagement: [219, 9586, 275]
+    Lead:       [126, 9792, 162]
   group:
-    Synchrony:  [84, 3179, 97]
-    Confidence: [94, 3155, 111]
-    Transition: [84, 3138, 138]
+    Synchrony:  [86, 3176, 98]
+    Confidence: [95, 3156, 109]
+    Transition: [85, 3138, 137]
 
 threshold:
   individual:
-    Engagement: [575, 8981, 524]
-    Lead:       [393, 9344, 343]
+    Engagement: [575, 8984, 521]
+    Lead:       [396, 9340, 344]
   group:
-    Synchrony:  [454, 2452, 454]
-    Confidence: [460, 2383, 517]
-    Transition: [601, 2195, 564]
+    Synchrony:  [456, 2449, 455]
+    Confidence: [457, 2384, 519]
+    Transition: [600, 2200, 560]
