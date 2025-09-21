@@ -1,3 +1,4 @@
+from selectors import EpollSelector
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -33,18 +34,95 @@ class MLP(nn.Module):
         return x
 
 
+class GatedMLP(nn.Module):
+    def __init__(
+            self,
+            in_features: int,
+            hidden_features: int = None,
+            out_features: int = None,
+            p_drop: float = 0.2,
+            gate_type: str = "swiglu",  # 'glu' | 'geglu' | 'swiglu'
+            use_residual: bool = False,
+            init_res_scale: float = 1e-4,
+    ):
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or max(64, in_features // 2)
+        assert gate_type in {"glu", "geglu", "swiglu"}
+
+        self.ln = nn.LayerNorm(in_features)
+        self.fc1 = nn.Linear(in_features, 2 * hidden_features)
+        self.drop = nn.Dropout(p_drop)
+        self.fc2 = nn.Linear(hidden_features, out_features)
+
+        self.gate_type = gate_type
+        self.use_residual = use_residual
+        if use_residual and in_features == out_features:
+            self.alpha = nn.Parameter(torch.tensor(init_res_scale))
+        else:
+            self.alpha = None
+            self.use_residual = False  # disable if shapes don't match
+
+    def _gate(self, a, b):
+        if self.gate_type == "glu":
+            return a * torch.sigmoid(b)
+        elif self.gate_type == "geglu":
+            return F.gelu(a) * b
+        else:  # 'swiglu'
+            return F.silu(a) * b
+
+    def forward(self, x):
+        x_in = x
+        x = self.ln(x)
+        a, b = self.fc1(x).chunk(2, dim=-1)
+        x = self._gate(a, b)
+        x = self.drop(x)
+        x = self.fc2(x)
+        if self.use_residual:
+            x = x_in + self.alpha * x
+        return x
+
+class LoRA(nn.Module):
+    def __init__(
+            self,
+            dim: int,
+            rank: int,
+            alpha: float = 1.0,
+            p_drop: float = 0.05,
+            act_layer: nn.Module = nn.GELU,
+            use_film=False
+    ):
+        super().__init__()
+        self.use_film = use_film
+        if use_film:
+            self.gamma = nn.Parameter(torch.zeros(dim))  # FiLM scale
+            self.beta  = nn.Parameter(torch.zeros(dim))  # FiLM shift
+        self.A = nn.Linear(dim, rank, bias=False)
+        self.B = nn.Linear(rank, dim, bias=False)
+        self.act = act_layer()
+        self.drop = nn.Dropout(p_drop)
+        self.alpha = nn.Parameter(torch.tensor(float(alpha)))
+
+    def forward(self, z):           # z: (B, D)
+        out = z
+        if self.use_film:
+            out = out + out * self.gamma + self.beta
+        low = self.B(self.drop(self.act(self.A(out))))
+        return out + self.alpha * low
+
+
 class ChannelLayerNorm2d(nn.Module):
     """
     LayerNorm over channels for 4D tensors (B, C, T, F).
     """
-    def __init__(self, C: int):
+    def __init__(self, C: int, eps: float = 1e-6):
         super().__init__()
-        self.ln = nn.LayerNorm(C)
+        self.ln = nn.LayerNorm(C, eps)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.permute(0, 2, 3, 1).contiguous()       # (B, T, F, C)
-        x = self.ln(x)                               # LN over channels only
-        return x.permute(0, 3, 1, 2).contiguous()    # back to (B, C, T, F)
+        x = x.permute(0, 2, 3, 1)                  # (B, T, F, C)
+        x = self.ln(x)                             # LN over channels only
+        return x.permute(0, 3, 1, 2).contiguous()  # back to (B, C, T, F)
 
 
 def _normalize_out_channels(v: Union[int, Tuple[int, int, int]]) -> Tuple[int, int, int]:

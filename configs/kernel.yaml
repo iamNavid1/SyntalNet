@@ -4,15 +4,17 @@ model:
     ind_cls_heads: ["Engagement", "Lead"],
     use_emb: True,
     use_feat: True,
-    cls_head_type: "cosine",
-    proto_warmup_epochs: 10
+    cls_head_type: "mlp",
+    proto_warmup_epochs: 0,
+    # p_drop_mod_s: 0.10,
+    # p_drop_mod_e: 0.0,
   }
 
 dataset:
   args:
     root_dir: "./dataset"
     modalities: ["face", "pose", "video", "turns", "utterance", "sentiment", "prosody", "audio",]
-    label_type: "label"
+    label_type: "kernel"
   split:
     mode: "item"  # "item" or "group" based split
     ratio: 0.2    # train-val split ratio
@@ -29,20 +31,26 @@ training:
   val_batch_size: 12
   learning_rate: 3.e-4
   min_lr: 1.e-5
-  warmup_ratio: 0.08
-  weight_decay: 1.e-4
+  warmup_ratio: 0.06
+  weight_decay: 0.001
   scheduler: "cosine_decay"  # cosine_decay | one_cycle
-  grad_clip: 5.0
-  accum_steps: 3
-  grad_log_interval: 37
-  loss_type: "focal"
+  grad_clip: 5.
+  accum_steps: 4
+  log_interval: 37
+  track_fusion_aux: True,
+  track_classifier_aux: True,
+  loss_type: "multiclass"
   amp: False
+  # classifier_lr_scale: 0.
+  # classifier_lr_warm_epochs: 30
   cb_beta: 0.9995
-  focal_gamma: 2.5
-  label_smoothing: 0.05
+  focal_gamma: 3.
+  # focal_gamma_anneal_start: 0.2
+  la_tau: 0.
+  label_smoothing: 0.02
   val_interval: 4
   ckpt_interval: 10
 
 logging:
-  log_dir: ./logs/8_label
-  checkpoint_dir: ./checkpoints/8_label
+  log_dir: ./logs/new_new_9_mlp
+  checkpoint_dir: ./checkpoints/new_new_9_mlp

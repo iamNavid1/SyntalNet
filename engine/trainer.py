@@ -6,14 +6,15 @@ import math
 import contextlib
 import numpy as np
 from collections import defaultdict
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 
 import torch
+import torch.nn as nn
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-from utils.losses import BaseLoss, ClassBalancedFocalLoss, ClassBalancedCELoss
+from utils.losses import ClassBalancedFocalLoss, ClassBalancedCELoss
 from engine.utils import BuildAutocastKWargs, modalities_to_branches, format_metrics
 from engine.validator import Validator
 
@@ -22,7 +23,7 @@ class Trainer:
     def __init__(
         self,
         cfg: Dict,
-        model: torch.nn.Module,
+        model: nn.Module,
         train_loader: DataLoader,
         val_loader: Optional[DataLoader],
         optimizer: torch.optim.Optimizer,
@@ -49,7 +50,7 @@ class Trainer:
 
         self.grad_clip = cfg.get("training").get("grad_clip", 0.0)
         self.accum_steps = cfg.get("training").get("accum_steps", 1)
-        self.grad_log_interval = cfg.get("training").get("grad_log_interval", 100)
+        self.log_interval = cfg.get("training").get("log_interval", 100)
 
         self.autocast_kwargs = BuildAutocastKWargs(cfg, device)
         self.scaler = self._build_grad_scaler()
@@ -58,11 +59,39 @@ class Trainer:
         label_type = cfg.get("dataset").get("args").get("label_type")
         smoothing = cfg.get("training").get("label_smoothing", 0.0)
         beta = cfg.get("training").get("cb_beta", 0.999)
-        gamma = cfg.get("training").get("focal_gamma", 2.0)
-        loss_type = cfg.get("training").get("loss_type", "focal")
-        self.criteria = self._build_criteria(loss_type, counts_cfg, label_type, smoothing, beta, gamma)
+        gamma = cfg.get("training").get("focal_gamma", 3.0)
+        # self.gamma_init = float(gamma)
+        # self.gamma_anneal_start = cfg.get("training").get("focal_gamma_anneal_start", 1.0)
+        loss_type = cfg.get("training").get("loss_type", "multiclass")
+        tau = cfg.get("training").get("la_tau", 0.)
+        self.criteria = self._build_criteria(loss_type, counts_cfg, label_type, smoothing, beta, gamma, tau)
+        # self.criteria = self._build_criteria(loss_type, counts_cfg, label_type, smoothing, beta, 0, tau)
+        # self.classifier_lr_warm_epochs = int(cfg.get("training").get("classifier_lr_warm_epochs", 0))
+        # self._classifier_lr_restored = self.classifier_lr_warm_epochs <= 0
 
         self.validator = Validator(self.device, self.autocast_kwargs)
+
+        self.track_fusion = bool(cfg.get("training", {}).get("track_fusion_aux", False))
+        self.track_classifier_aux = bool(cfg.get("training", {}).get("track_classifier_aux", False))
+        model_ref = getattr(self.model, "module", self.model)
+        self.mm_fusion_obj = getattr(model_ref, "mm_fusion", None)
+        self.mc_fusion_objs: Dict[str, Any] = {}
+        for name, br in getattr(model_ref, "branches", {}).items():
+            if getattr(br, "mc_fusion", None) is not None:
+                self.mc_fusion_objs[name] = br.mc_fusion
+
+
+        # from activation_profiler import ActivationMemoryProfiler
+        # from models.encoder import CNXv2Block, FMixLowRank, StageTransition
+        # from models.fusion import GPSFusion, GLRFusion
+        # from models.classifier import ClassificationHead
+        # from models.squeeze_excite import CrossSE
+
+        # self.prof = ActivationMemoryProfiler(
+        #     model,
+        #     include_classes=[CNXv2Block, FMixLowRank, StageTransition, GPSFusion, GLRFusion, ClassificationHead, CrossSE],
+        #     # or filter by name: include_name_regex=r"(encoder|GPSFusion|GLRFusion|classifier)"
+        #     )
 
     # ------------------------- public API -----------------------------
 
@@ -74,6 +103,10 @@ class Trainer:
         checkpoint_interval: int = 1,
     ):
         os.makedirs(ckpt_dir, exist_ok=True)
+
+        self.total_epochs = epochs
+        if self.mm_fusion_obj is not None:
+            self.mm_fusion_obj.set_total_epochs(epochs)
 
         best_val_loss = float("inf")
 
@@ -103,6 +136,8 @@ class Trainer:
                 print(f"Saving checkpoint for epoch {epoch+1} to {ckpt_dir}...")
                 ckpt_path = os.path.join(ckpt_dir, f"epoch_{epoch+1}.pth")
                 self.save_checkpoint(ckpt_path, epoch)
+
+            # self.prof.print_summary(sort_by="saved_bytes", topk=50)
 
         self.close()
 
@@ -166,7 +201,11 @@ class Trainer:
     # ------------------------- private API -----------------------------
 
     def _train_one_epoch(self, epoch: int):
+        
         self.model.train()
+        # self._maybe_update_gamma(epoch)
+        # self._maybe_update_classifier_lr(epoch)
+
         running_loss = 0.0
         running_count = 0
         interval_loss = 0.0
@@ -190,6 +229,9 @@ class Trainer:
 
             with torch.no_grad():
                 self.model.update_prototypes(features, proto_targets)
+
+            mc_fusion_aux, mm_fusion_aux = self._get_fusion_aux()
+            classifier_aux_data = self._get_classifier_aux()
 
             do_sync = ((step + 1) % self.accum_steps == 0)
             ctx = self.model.no_sync() if (is_ddp and not do_sync) else contextlib.nullcontext()
@@ -217,6 +259,8 @@ class Trainer:
                 self.writer.add_scalar("train/loss_step", avg_loss, self.global_step+1)
                 for i, pg in enumerate(self.optimizer.param_groups):
                     self.writer.add_scalar(f"train/lr_group{i}", pg.get("lr", 0.0), self.global_step+1)
+                self._maybe_log_fusion_aux(mc_fusion_aux, mm_fusion_aux, self.global_step+1)
+                self._maybe_log_classifier_aux(classifier_aux_data, self.global_step+1)
                 interval_loss = 0.0
                 interval_count = 0
             self.global_step += 1
@@ -230,6 +274,8 @@ class Trainer:
                 f"Epoch {epoch+1} Step {steps}/{len(self.train_loader)} Loss {avg_loss:.4f}"
             )
             self.writer.add_scalar("train/loss_step", avg_loss, self.global_step+1)
+            self._maybe_log_fusion_aux(mc_fusion_aux, mm_fusion_aux, self.global_step+1)
+            self._maybe_log_classifier_aux(classifier_aux_data, self.global_step+1)
 
         if running_count > 0 and self._is_main():
             epoch_loss = running_loss / running_count
@@ -298,7 +344,7 @@ class Trainer:
         if self.grad_clip > 0:
             clip_val = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
             if self._is_main() and self.writer is not None:
-                self.writer.add_scalar("grad/clip_norm", float(clip_val), step_opt)
+                self._maybe_log_clip_val(clip_val, step_opt)
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self.optimizer.zero_grad(set_to_none=True)
@@ -324,8 +370,9 @@ class Trainer:
         smoothing: float,
         beta: float,
         gamma: float,
-    ) -> Dict[str, Dict[str, BaseLoss]]:
-        criteria: Dict[str, Dict[str, BaseLoss]] = defaultdict(dict)
+        tau: float,
+    ) -> Dict[str, Dict[str, nn.Module]]:
+        criteria: Dict[str, Dict[str, nn.Module]] = defaultdict(dict)
 
         if isinstance(counts_cfg, str):
             with open(counts_cfg, "r") as f:
@@ -343,12 +390,97 @@ class Trainer:
                 c = torch.tensor(counts_map.get(head_name), dtype=torch.float, device=self.device)
                 if loss_type == "ce":
                     criteria[split_name][head_name] = ClassBalancedCELoss(
-                        c, beta, smoothing).to(self.device)
+                        c, beta, tau, smoothing).to(self.device)
                 else:
                     criteria[split_name][head_name] = ClassBalancedFocalLoss(
-                        c, beta, gamma, smoothing).to(self.device)
+                        c, beta, gamma, tau, smoothing, loss_type).to(self.device)
+                    # criteria[split_name][head_name] = ClassBalancedFocalLoss(
+                    #     c, beta, gamma, smoothing, loss_type).to(self.device)
 
         return criteria
+
+
+    # def _maybe_update_gamma(self, epoch) -> None:
+    #     if self.gamma_anneal_start >= 1.0:
+    #         return
+    #     progress = epoch / max(1, self.total_epochs - 1)
+    #     if progress < self.gamma_anneal_start:
+    #         return
+    #     frac = (progress - self.gamma_anneal_start) / (1 - self.gamma_anneal_start)
+    #     new_gamma = 0.5 * self.gamma_init * (1.0 + math.cos(math.pi * frac))
+    #     for split in self.criteria.values():
+    #         for crit in split.values():
+    #             if isinstance(crit, ClassBalancedFocalLoss):
+    #                 crit.set_gamma(new_gamma)
+    # def _maybe_update_gamma(self, epoch) -> None:
+    #     progress = epoch / max(1, self.total_epochs - 1)
+
+    #     start = float(getattr(self, "gamma_anneal_start", 0.0))
+    #     peak  = 0.60  # reach max gamma by 60% of training
+
+    #     # clamp to sane range
+    #     start = max(0.0, min(start, 1.0))
+    #     peak  = max(0.0, min(peak, 1.0))
+
+    #     if start >= peak:
+    #         # If start >= 60%, hit max immediately at 'start'
+    #         new_gamma = 0.0 if progress < start else float(self.gamma_init)
+    #     else:
+    #         if progress < start:
+    #             new_gamma = 0.0
+    #         elif progress < peak:
+    #             # cosine warm-up from 0 -> gamma_init over [start, peak]
+    #             frac = (progress - start) / (peak - start)  # in [0,1)
+    #             new_gamma = float(self.gamma_init) * 0.5 * (1.0 - math.cos(math.pi * frac))
+    #         else:
+    #             new_gamma = float(self.gamma_init)
+
+    #     for split in self.criteria.values():
+    #         for crit in split.values():
+    #             if isinstance(crit, ClassBalancedFocalLoss):
+    #                 crit.set_gamma(new_gamma)
+
+    # def _maybe_update_classifier_lr(self, epoch: int) -> None:
+    #     if self._classifier_lr_restored:
+    #         return
+
+    #     base_lr = float(self.cfg.get("training", {}).get("learning_rate", 0.0))
+    #     warm_epochs = max(0, self.classifier_lr_warm_epochs)
+    #     reached_base = True
+
+    #     for idx, pg in enumerate(self.optimizer.param_groups):
+    #         if pg.get("tag") != "classifier":
+    #             continue
+
+    #         target_lr = float(pg.get("target_lr", base_lr))
+    #         start_scale = float(pg.get("lr_scale", 1.0))
+
+    #         if warm_epochs <= 0:
+    #             ramp_scale = 1.0
+    #         elif warm_epochs == 1 or epoch >= warm_epochs - 1:
+    #             ramp_scale = 1.0
+    #         else:
+    #             progress = epoch / max(1, warm_epochs - 1)
+    #             progress = max(0.0, min(1.0, progress))
+    #             ramp_scale = start_scale + (1.0 - start_scale) * progress
+
+    #         new_lr = target_lr * ramp_scale
+
+    #         if not math.isclose(pg["lr"], new_lr, rel_tol=1e-6, abs_tol=1e-8):
+    #             pg["lr"] = new_lr
+    #             if "initial_lr" in pg:
+    #                 pg["initial_lr"] = new_lr
+    #             if hasattr(self.scheduler, "base_lrs") and len(self.scheduler.base_lrs) > idx:
+    #                 self.scheduler.base_lrs[idx] = new_lr
+
+    #         reached_base = reached_base and math.isclose(ramp_scale, 1.0, rel_tol=1e-6, abs_tol=1e-8)
+
+    #     if reached_base:
+    #         self._classifier_lr_restored = True
+    #         if self._is_main() and self.logger is not None:
+    #             self.logger.info(
+    #                 "Classifier parameter groups reached base learning rate at epoch %d", epoch + 1
+    #             )
 
 
     @staticmethod
@@ -357,14 +489,58 @@ class Trainer:
 
 
     def close(self):
+        # self.prof.clear()  
         if self.writer is not None:
             self.writer.close()
 
 
+    def _get_fusion_aux(self):
+        mc_aux = {
+            name: mod.get_aux() for name, mod in self.mc_fusion_objs.items()
+            } if self.mc_fusion_objs else None
+        mm_aux = self.mm_fusion_obj.get_aux() if self.mm_fusion_obj is not None else None
+        return mc_aux, mm_aux
+
+    def _get_classifier_aux(self):
+        """Probe classifier heads directly to get auxiliary data."""
+        model_ref = getattr(self.model, "module", self.model)
+        classifier_aux = {}
+        
+        if hasattr(model_ref, "individual_classifier") and model_ref.individual_classifier is not None:
+            ind_classifier = model_ref.individual_classifier
+            if hasattr(ind_classifier, "classifiers") and hasattr(ind_classifier, "classifier_type"):
+                if ind_classifier.classifier_type == "cosine":
+                    ind_aux = {}
+                    for head_name in ind_classifier.heads:
+                        classifier = ind_classifier.classifiers[head_name]
+                        if hasattr(classifier, "get_aux"):
+                            aux = classifier.get_aux()
+                            if aux is not None:
+                                ind_aux[head_name] = aux
+                    if ind_aux:
+                        classifier_aux["individual"] = ind_aux
+        
+        if hasattr(model_ref, "group_classifier") and model_ref.group_classifier is not None:
+            grp_classifier = model_ref.group_classifier
+            if hasattr(grp_classifier, "classifiers") and hasattr(grp_classifier, "classifier_type"):
+                if grp_classifier.classifier_type == "cosine":
+                    grp_aux = {}
+                    for head_name in grp_classifier.heads:
+                        classifier = grp_classifier.classifiers[head_name]
+                        if hasattr(classifier, "get_aux"):
+                            aux = classifier.get_aux()
+                            if aux is not None:
+                                grp_aux[head_name] = aux
+                    if grp_aux:
+                        classifier_aux["group"] = grp_aux
+        
+        return classifier_aux
+
+
     def _maybe_log_gradients(self, step_opt: int) -> None:
-        if self.grad_log_interval <= 0:
+        if self.log_interval <= 0:
             return
-        if step_opt % self.grad_log_interval != 0:
+        if step_opt % self.log_interval != 0:
             return
 
         def _grad_group_key(param_name: str) -> str:
@@ -413,3 +589,81 @@ class Trainer:
             self.writer.add_scalar(f"grad/{module}/max_abs",  s["max_abs"], step_opt)
             self.writer.add_histogram(f"grad/{module}/hist", torch.cat(s["grad_bufs"], dim=0), step_opt)
 
+
+    def _maybe_log_clip_val(self, clip_val: float, step_opt: int) -> None:
+        if self.log_interval <= 0:
+            return
+        if step_opt % self.log_interval != 0:
+            return
+        self.writer.add_scalar("grad/clip_norm", float(clip_val), step_opt)
+
+
+    def _maybe_log_fusion_aux(self, mc_aux, mm_aux, step: int) -> None:
+        if self.log_interval <= 0:
+            return
+        if self.optim_step % self.log_interval != 0:
+            return
+        if not self.track_fusion or self.writer is None:
+            return
+        if mc_aux is None or mm_aux is None:
+            return
+
+        for name, aux in mc_aux.items():
+            if aux is None:
+                continue
+            if aux.get("alloc") is not None:
+                alloc_mean = aux["alloc"].mean(dim=0)
+                self.writer.add_scalar(f"train/mc_alloc_feat_{name}", float(alloc_mean[0]), step)
+                self.writer.add_scalar(f"train/mc_alloc_emb_{name}", float(alloc_mean[1]), step)
+                # new
+                self.writer.add_histogram(f"train/mc_alloc_hist_feat_{name}", aux["alloc"][:, 0], step)
+                self.writer.add_histogram(f"train/mc_alloc_hist_emb_{name}", aux["alloc"][:, 1], step)
+                # ---
+            if aux.get("quality") is not None:
+                self.writer.add_scalar(f"train/mc_quality_{name}", float(aux["quality"].mean()), step)
+
+        model_ref = getattr(self.model, "module", self.model)
+        branch_names = list(getattr(model_ref, "branches", {}).keys())
+        if mm_aux.get("alloc") is not None:
+            alloc_mean = mm_aux["alloc"].mean(dim=0)
+            for i, name in enumerate(branch_names):
+                self.writer.add_scalar(f"train/mm_alloc_{name}", float(alloc_mean[i]), step)
+                # new
+                self.writer.add_histogram(f"train/mm_alloc_hist_{name}", mm_aux["alloc"][:, i], step)
+                # ---
+        if mm_aux.get("gate") is not None:
+            gate_mean = mm_aux["gate"].mean(dim=0)
+            for i, name in enumerate(branch_names):
+                self.writer.add_scalar(f"train/mm_gate_{name}", float(gate_mean[i]), step)
+        pair_scale = mm_aux.get("pair_scale")
+        if pair_scale is not None:
+            self.writer.add_scalar("train/mm_pair_scale", float(pair_scale), step)
+        drop_rates = mm_aux.get("drop_rates")
+        if drop_rates is not None:
+            for i, name in enumerate(branch_names):
+                self.writer.add_scalar(f"train/mm_drop_rate_{name}", float(drop_rates[i]), step)
+
+
+    def _maybe_log_classifier_aux(self, classifier_aux: Dict[str, Dict[str, Dict[str, torch.Tensor]]], step: int) -> None:
+        if self.log_interval <= 0:
+            return
+        if self.optim_step % self.log_interval != 0:
+            return
+        if not self.track_classifier_aux or self.writer is None:
+            return
+        if not classifier_aux:
+            return
+
+        for split_name, split_aux in classifier_aux.items():
+            for head_name, head_aux in split_aux.items():
+                if head_aux is None:
+                    continue
+                
+                if "fuse_logit_sigmoid" in head_aux:
+                    fuse_sigmoid = head_aux["fuse_logit_sigmoid"]  # (K,)
+                    for class_idx in range(fuse_sigmoid.shape[0]):
+                        self.writer.add_scalar(
+                            f"train/classifier_{split_name}_{head_name}_fuse_sigmoid_class_{class_idx+1}", 
+                            float(fuse_sigmoid[class_idx]), 
+                            step
+                        )

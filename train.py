@@ -239,7 +239,6 @@ def run_training(cfg, args, device, local_rank, distributed, logger, writer):
     }
     scheduler = build_scheduler(optimizer, scheduler_cfg)
 
-
     trainer = Trainer(
         cfg          = cfg,
         model        = model,

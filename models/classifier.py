@@ -1,12 +1,14 @@
 import math
+from turtle import forward
 
+from sympy import group
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributed as dist
 from typing import List, Optional, Dict
 
-from models.utils import MLP
+from models.utils import MLP, GatedMLP, LoRA
 
 
 class CosineProtoClassifier(nn.Module):
@@ -18,17 +20,17 @@ class CosineProtoClassifier(nn.Module):
       - mask unseen prototypes early
     """
     def __init__(
-        self, 
+        self,
         dim: int, 
         num_classes: int = 3,
         init_scale_param: float = 16.0,
         use_prototypes: bool = True,
-        init_scale_proto: float = 10.0,
-        proto_momentum: float = 0.99,
-        fuse_init: float = -0.62,
+        init_scale_proto: float = 8.0,
+        proto_momentum: float = 0.96,
+        fuse_init: float | List[float] = [-1.734, -1.386, -1.734],
         warmup_epochs: int = 5,
         learn_temperature: bool = True,
-        init_temperature: float = 1.0,
+        init_temperature: float = 1.2,
     ):
         super().__init__()
         self.D = dim
@@ -47,7 +49,13 @@ class CosineProtoClassifier(nn.Module):
             self.register_buffer("prototypes", F.normalize(torch.randn(num_classes, dim), dim=1))
             self.register_buffer("proto_counts", torch.zeros(num_classes))
             self.log_scale_proto = nn.Parameter(torch.log(torch.tensor(init_scale_proto)))
-            self.fuse_logit = nn.Parameter(torch.full((num_classes,), fuse_init))  # per-class λ in (0,1)
+            if isinstance(fuse_init, (float, int)):
+                fuse_init = torch.full((num_classes,), fuse_init)  # per-class λ in (0,1)
+            else:
+                fuse_init = torch.as_tensor(fuse_init, dtype=torch.float32)
+                if fuse_init.numel() != num_classes:
+                    raise ValueError(f"fuse_init must be scalar or length {num_classes}")
+            self.fuse_logit = nn.Parameter(fuse_init)  # per-class λ logits
 
         # temperature
         self.learn_temperature = learn_temperature
@@ -98,7 +106,7 @@ class CosineProtoClassifier(nn.Module):
         return w
 
     def forward(self, z: torch.Tensor, epoch: Optional[int] = None, progress: Optional[float] = None) -> torch.Tensor:
-        s_param = torch.exp(self.log_scale_param).clamp(1., 100.)
+        s_param = torch.exp(self.log_scale_param).clamp(5., 40.)
         logits_param = self._cos_logits(z, self.W, s_param)
 
         if self.use_prototypes:
@@ -111,7 +119,7 @@ class CosineProtoClassifier(nn.Module):
             w = self._warmup_weight(p)
 
             # compute prototype scale and logits
-            s_proto = torch.exp(self.log_scale_proto).clamp(1., 100.)
+            s_proto = torch.exp(self.log_scale_proto).clamp(5., 50.)
             s_proto = s_proto * max(1e-6, w)  # ramp prototype scale
             logits_proto = self._cos_logits(z, self.prototypes, s_proto)
 
@@ -129,8 +137,54 @@ class CosineProtoClassifier(nn.Module):
             logits = logits_param
 
         # add temperature
-        T = (torch.exp(self.log_T) if self.log_T is not None else self.T_buffer).clamp(1e-3, 100.0)
+        T = (torch.exp(self.log_T) if self.log_T is not None else self.T_buffer).clamp(1.0, 2.0)
+        
+        # store auxiliary data for tracking
+        if self.use_prototypes:
+            self._last_aux = {
+                "fuse_logit_sigmoid": torch.sigmoid(self.fuse_logit).detach(),  # (K,)
+                "warmup_weight": torch.tensor(w, device=self.fuse_logit.device).detach(),
+            }
+        else:
+            self._last_aux = None
+            
         return logits / T
+
+    def get_aux(self) -> Optional[Dict[str, torch.Tensor]]:
+        """Return auxiliary data for tracking."""
+        return self._last_aux
+
+
+class DeepSetsTrunk(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        d_phi_h: int,
+        d_phi: int,
+        trunk_hidden: int,
+        trunk_gate: str = "swiglu",
+        p_drop_trunk: float = 0.15,
+    ):
+        super().__init__()
+        self.phi = MLP(dim, d_phi_h, d_phi_h, p_drop=0.1)
+        self.trunk = GatedMLP(
+            in_features=d_phi,
+            hidden_features=trunk_hidden,
+            out_features=dim,
+            p_drop=p_drop_trunk,
+            gate_type=trunk_gate,
+        )
+
+    def forward(self, z_person):
+        """
+        z_person: (B, P, D)
+        """
+        B, P, D = z_person.shape
+        z_person = z_person.view(B*P, D)
+        h = self.phi(z_person).view(B, P, -1)
+        s = h.sum(dim=1) / P
+        z_grp = self.trunk(s)
+        return z_grp
 
 
 class ClassificationHead(nn.Module):
@@ -142,14 +196,17 @@ class ClassificationHead(nn.Module):
         dim: int,
         head_names: List[str],
         num_classes: int = 3,
+        trunk_phi_h: Optional[int] = None, 
+        trunk_phi: Optional[int] = None, 
         trunk_hidden: Optional[int] = None, 
-        p_drop_trunk: float = 0.2,
-        adapter_hidden: Optional[int] = None, 
-        p_drop_adapter: float = 0.1,
+        p_drop_trunk: float = 0.15,
+        lora_adapter: bool = False,
+        adapter_hidden: Optional[int] = None,
+        p_drop_adapter: float = 0.15,
         residual: bool = True,
         use_prototypes: bool = True, 
         proto_momentum: float = 0.99, 
-        warmup_epochs: int = 5,
+        warmup_epochs: int = 0,
         group_wise: bool = False,
         person_per_grp: int = 3,
         classifier_type: str = "cosine",
@@ -163,13 +220,21 @@ class ClassificationHead(nn.Module):
             dim = dim * person_per_grp
         
         self.residual = residual
-        if residual:
-            self.alpha = nn.Parameter(torch.full((dim,), 1e-4))
+        if residual and not (group_wise and lora_adapter):
+            self.alpha = nn.Parameter(torch.full((dim,), 2.5e-1))
         
-        self.trunk = MLP(dim, trunk_hidden, p_drop=p_drop_trunk)
+        if group_wise:
+            self.trunk = DeepSetsTrunk(dim, trunk_phi_h, trunk_phi, trunk_hidden, p_drop_trunk=p_drop_trunk)
+        else:
+            self.trunk = MLP(dim, trunk_hidden, dim, p_drop=p_drop_trunk)
 
-        self.adapters = nn.ModuleDict({name: MLP(dim, adapter_hidden, p_drop=p_drop_adapter)
-                                       for name in self.heads})
+        self.lora_adapter = lora_adapter
+        if lora_adapter:
+            self.adapters = nn.ModuleDict({name: LoRA(dim, adapter_hidden, use_film=True)
+                                        for name in self.heads})
+        else:
+            self.adapters = nn.ModuleDict({name: MLP(dim, adapter_hidden, p_drop=p_drop_adapter)
+                                        for name in self.heads})
 
         self.classifier_type = classifier_type
         if classifier_type == "cosine":
@@ -206,18 +271,18 @@ class ClassificationHead(nn.Module):
         if self.group_wise:
             B, D = z.shape
             B = B // self.P
-            z = z.view(B, self.P, D).reshape(B, self.P * D)
+            z = z.view(B, self.P, D)
         
         z_shared = self.trunk(z)
         
-        if self.residual:
+        if self.residual and not self.group_wise:
             z_shared = z + self.alpha * z_shared 
 
         z_head: Dict[str, torch.Tensor] = {}
         logits: Dict[str, torch.Tensor] = {}
         for name in self.heads:
             z_out = self.adapters[name](z_shared)
-            if self.residual:
+            if self.residual and not self.lora_adapter:
                 z_out = z_shared + self.alpha * z_out
             z_head[name] = z_out
             if self.classifier_type == "cosine":

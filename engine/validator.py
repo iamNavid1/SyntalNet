@@ -104,6 +104,7 @@ class Validator:
         )
 
     def _get_head_specs(self, model):
+        model = getattr(model, "module", model)
         specs: Dict[str, Dict[str, int]] = {}
         if getattr(model, "individual_classifier", None) is not None:
             specs["individual"] = {name: clf.K for name, clf in model.individual_classifier.classifiers.items()}
@@ -113,6 +114,7 @@ class Validator:
         return specs
 
     def _build_metric_sets(self, model):
+        model = getattr(model, "module", model)
         metric_sets: Dict[str, Dict[str, Dict[str, torch.nn.Module]]] = {}
 
         if getattr(model, "individual_classifier", None) is not None:

@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from models.utils import ChannelLayerNorm2d
+
 class ChannelGate(nn.Module):
     """
     Channel-wise gating: squeezes spatial dimensions (T, F) to produce
@@ -71,9 +73,11 @@ class CrossSE(nn.Module):
     def __init__(
         self,
         num_channels: int,
-        reduction_ratio: int = 16,
+        reduction_ratio: int = 8,
+        num_person: int = 3,
         init_alpha: float = 0.0,
-        dropout_p: float = 0.05
+        dropout_p: float = 0.05,
+        norm: bool = False,
     ):
         """
         :param num_channels: channels per stream after CNN backbone (C)
@@ -82,34 +86,38 @@ class CrossSE(nn.Module):
         :param dropout_p: dropout probability on the residual path
         """
         super().__init__()
+        self.P = num_person
         self.se = SEBlock(num_channels, reduction_ratio)
         # learnable scalar controlling how much of the others' features to add
         self.alpha = nn.Parameter(torch.tensor(init_alpha, dtype=torch.float32))
-        # regularize the cross-person residual
         self.dropout = nn.Dropout(p=dropout_p)
+        self.norm = ChannelLayerNorm2d(num_channels) if norm else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
-        :param x: tensor of shape (B, P, C, T, F)
+        :param x: tensor of shape (BP, C, T, F)
         :return: tensor of same shape with cross-person fusion applied
         """
-        B, P, C, T, F = x.shape
+        BP, C, T, F = x.shape
+        P = self.P
+        B = BP // P
 
         # 1) Shared gating: apply SE block to each stream
-        x_flat = x.view(B * P, C, T, F)          # (B⋅P, C, T, F)
-        gated = self.se(x_flat)                  # (B⋅P, C, T, F)
-        gated = gated.view(B, P, C, T, F)        # (B, P, C, T, F)
+        x_gated = self.se(x)                  # (B⋅P, C, T, F)
+        x_gated = x_gated.view(B, P, C, T, F)   # (B, P, C, T, F)
 
         # 2) Cross-person residual aggregation
         #    for each p, sum the gated features of all others
-        sum_all = gated.sum(dim=1, keepdim=True) # (B, 1, C, T, F)
+        sum_all = x_gated.sum(dim=1, keepdim=True) # (B, 1, C, T, F)
         # subtract self to get sum_{j≠p}
-        others_sum = sum_all - gated             # (B, P, C, T, F)
+        others_sum = sum_all - x_gated             # (B, P, C, T, F)
+        others_mean = others_sum / max(1, P-1)
 
-        # 3) scale by α, apply dropout, add back to original x
-        residual = self.alpha * others_sum       # (B, P, C, T, F)
-        residual = self.dropout(residual)
-        out = x + residual                       # (B, P, C, T, F)
+        # 3) norm, dropout, scale, residual
+        out = self.norm(others_mean.view(BP, C, T, F))
+        out = self.dropout(out)
+        out = self.alpha * out
+        out = x + out
 
         return out
 

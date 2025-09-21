@@ -104,10 +104,15 @@ class PartialConv2d(nn.Module):
             mode = "per_channel"
         elif C_mask == self.groups:
             mode = "per_group"
-        else:
-            raise ValueError(
-                f"Invalid mask channels={C_mask}. Expected 1, in_channels={C} (requires groups==1), or groups={self.groups}."
-            )
+        # else:
+        #     raise ValueError(
+        #         f"Invalid mask channels={C_mask}. Expected 1, in_channels={C} (requires groups==1), or groups={self.groups}."
+        #     )
+        elif C_mask == C and self.groups > 1:
+            # reduce to per-group
+            B, _, H, W = mask.shape
+            mask = mask.view(B, self.groups, C // self.groups, H, W).amax(dim=2)
+            mode = "per_group"
         
         # multiply input by appropriate mask expansion
         if mode == "per_group":
@@ -254,9 +259,13 @@ class PartialAvgPool2d(nn.Module):
             m_exp = m
 
         # sum of valid features in each window
-        x_sum = F.avg_pool2d(x * m_exp, self.kernel_size, self.stride, self.padding) * self.area
+        x_sum = F.avg_pool2d(x * m_exp, 
+                            self.kernel_size, self.stride, self.padding,
+                            ceil_mode=True) * self.area
         # number of valid entries per window
-        m_cnt = F.avg_pool2d(m, self.kernel_size, self.stride, self.padding) * self.area
+        m_cnt = F.avg_pool2d(m, 
+                            self.kernel_size, self.stride, self.padding,
+                            ceil_mode=True) * self.area
 
         # renormalize by valid count (avoid div by 0)
         x_out = torch.where(m_cnt > 0, x_sum / m_cnt.clamp_min(1.0), torch.zeros_like(x_sum))
@@ -266,39 +275,76 @@ class PartialAvgPool2d(nn.Module):
 
 class PartialGeM(nn.Module):
     """
-    Generalized Mean pooling with optional spatial mask over H*W (global 2D).
-    If m is provided:
-      y = ( sum( (clamp(x, eps)^p) * m ) / sum(m) )^(1/p)
-    Else:
-      y = ( mean( clamp(x, eps)^p ) )^(1/p)
+    Generalized Mean pooling (global or local) with optional spatial mask over H*W (global 2D).
+    
+    Global mode (default):    (B,C,H,W) -> (B,C,1,1)
+      - If mask `m` is given (B,1 or C,H,W), compute masked mean of x^p.
+
+    Local mode (downsample):  (B,C,H,W) -> (B,C,H',W')
+      - Uses windowed average of x^p, mask-aware via PartialAvgPool2d if mask is provided.
+      - Falls back to nn.AvgPool2d when mask is None.
     """
-    def __init__(self, p: float = 3.0, eps: float = 1e-6):
+    def __init__(
+        self,
+        kernel_size: int | Tuple[int, int] = None,
+        stride: int | Tuple[int, int] = None,
+        global_pool: bool = True,
+        p: float = 3.0,
+        eps: float = 1e-6,
+        return_mask: bool = False,
+    ):
         super().__init__()
         self.eps = eps
+        self.global_pool = bool(global_pool)
+        self.return_mask = bool(return_mask)
+
         # inverse-softplus init for q s.t. softplus(q) ≈ p
         q_init = torch.log(torch.expm1(torch.tensor(float(p))))
         self.q = nn.Parameter(q_init)
+
+        if not self.global_pool:
+            if kernel_size is None:
+                raise ValueError("kernel_size must be set when global_pool=False")
+            self.k = _pair(kernel_size)
+            self.s = self.k if stride is None else _pair(stride)
+            self._partial_pool = PartialAvgPool2d(self.k, self.s) if PartialAvgPool2d is not None else None
 
     def forward(self, x: torch.Tensor, m: Optional[torch.Tensor] = None):
         p = F.softplus(self.q) + self.eps  # ensure p > 0
         x_p = x.clamp(min=self.eps).pow(p)  # (B,C,H,W)
 
-        if m is None:
-            pooled = F.adaptive_avg_pool2d(x_p, (1, 1))     # mean over HxW of x^p
+        # -------- GLOBAL GeM --------
+        if self.global_pool:
+            if m is None:
+                pooled = F.adaptive_avg_pool2d(x_p, (1, 1))     # mean over HxW of x^p
+            else:
+                if m.size(1) == 1 and x_p.size(1) > 1:
+                    m = m.expand(-1, x_p.size(1), -1, -1)
+                m = m.to(dtype=x_p.dtype)
+
+                num = (x_p * m).sum(dim=(2, 3), keepdim=True)
+                den = m.sum(dim=(2, 3), keepdim=True)
+
+                # identify empty masks per sample/channel
+                empty = den <= self.eps
+                den = den.clamp(min=self.eps)
+                masked_mean = num / den
+
+                pooled = torch.where(empty, torch.full_like(masked_mean, self.eps), masked_mean).clamp(min=self.eps)
+
             return pooled.pow(1.0 / p)
 
-        if m.size(1) == 1 and x_p.size(1) > 1:
-            m = m.expand(-1, x_p.size(1), -1, -1)
-        m = m.to(dtype=x_p.dtype)
+        # -------- LOCAL GeM --------
+        if m is None:
+            # standard avg pool on x^p
+            pooled = F.avg_pool2d(x_p, self.k, self.s)
+            out = pooled.clamp(min=self.eps).pow(1.0 / p)
+            return out
 
-        num = (x_p * m).sum(dim=(2, 3), keepdim=True)
-        den = m.sum(dim=(2, 3), keepdim=True)
+        # mask-aware local pooling on x^p
+        pooled, m_out = self._partial_pool(x_p, m)  # mean of x^p over valid positions
+        pooled = pooled.clamp(min=self.eps).pow(1.0 / p)
 
-        # identify empty masks per sample/channel
-        empty = den <= self.eps
-        den = den.clamp(min=self.eps)
-        masked_mean = num / den
-
-        pooled = torch.where(empty, torch.full_like(masked_mean, self.eps), masked_mean).clamp(min=self.eps)
-
-        return pooled.pow(1.0 / p)
+        if self.return_mask:
+            return pooled, m_out
+        return pooled
