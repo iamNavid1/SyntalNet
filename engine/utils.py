@@ -49,30 +49,25 @@ BRANCH_MODALITY_MAP = {
 }
 
 
-def modalities_to_branches(batch_data: Dict[str, tuple]) -> Dict[str, tuple]:
+def modalities_to_branches(batch_data: Dict[str, tuple]) -> Dict[str, Dict[str, tuple]]:
     """
     Group modality tensors into model branches.
     """
-    branch_data: Dict[str, tuple] = {}
+    branch_data: Dict[str, Dict[str, tuple]] = {}
 
     for branch, spec in BRANCH_MODALITY_MAP.items():
+        mod_dict: Dict[str, tuple] = {}
 
-        present_feat = [batch_data[m] for m in spec["feat"] if m in batch_data]
-        if present_feat:
-            feat_tensors = [pair[0] for pair in present_feat]
-            feat_masks = [pair[1] for pair in present_feat]
-        else:
-            feat_tensors, feat_masks = None, None
+        for modality in spec["feat"]:
+            if modality in batch_data:
+                mod_dict[modality] = batch_data[modality]
 
-        if spec["emb"] in batch_data:
-            emb_tensor, emb_mask = batch_data[spec["emb"]]
-        else:
-            emb_tensor, emb_mask = None, None
+        emb_mod = spec["emb"]
+        if emb_mod in batch_data:
+            mod_dict[emb_mod] = batch_data[emb_mod]
 
-        if feat_tensors is None and emb_tensor is None:  # skip the branch
-            continue
-
-        branch_data[branch] = (feat_tensors, feat_masks, emb_tensor, emb_mask)
+        if mod_dict:  # skip branches with no available modalities in this batch
+            branch_data[branch] = mod_dict
 
     return branch_data
 

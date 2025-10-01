@@ -1,0 +1,51 @@
+model:
+  name: VanillaCNN
+  args:
+    hidden_size: 128
+    num_cnn_layers: 3
+    kernel_size: 3
+    dropout: 0.2
+    ind_cls_heads: ["Engagement", "Lead"]
+    grp_cls_heads: ["Synchrony", "Confidence", "Transition"]
+
+dataset:
+  args:
+    root_dir: "./dataset"
+    modalities: ["face", "pose", "video", "turns", "utterance", "sentiment", "prosody", "audio"]
+    label_type: "kernel"
+  split:
+    mode: "item"
+    ratio: 0.2
+    groups: []
+    seed: 17
+  stats_dir: "./configs/normalization_stats.yaml"
+  cls_count_dir: "./configs/class_counts.yaml"
+
+training:
+  seed: 42
+  num_workers: 4
+  epochs: 120
+  batch_size: 12
+  val_batch_size: 12
+  learning_rate: 3.e-4
+  min_lr: 1.e-5
+  warmup_ratio: 0.06
+  weight_decay: 0.001
+  scheduler: "cosine_decay"
+  grad_clip: 5.
+  accum_steps: 4
+  log_interval: 50
+  track_fusion_aux: False
+  track_classifier_aux: False
+  loss_type: "multiclass"
+  amp: False
+  cb_beta: 0.9995
+  focal_gamma: 3.
+  la_tau: 0.
+  label_smoothing: 0.02
+  val_interval: 4
+  ckpt_interval: 10
+
+logging:
+  log_dir: ./logs/vanilla_cnn
+  checkpoint_dir: ./checkpoints/vanilla_cnn

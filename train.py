@@ -175,9 +175,12 @@ def build_datasets(cfg, logo_held_out=None):
 
 def build_loaders(cfg, train_dataset, val_dataset, distributed: bool):
     num_workers = cfg["training"].get("num_workers", 4)
+    prefetch_factor = cfg["training"].get("prefetch_factor", 4)
 
     train_sampler = DistributedSampler(train_dataset) if distributed else None
     val_sampler = DistributedSampler(val_dataset, shuffle=False) if distributed else None
+
+    pin_memory_device = f"cuda:{torch.cuda.current_device()}" if torch.cuda.is_available() else ""
 
     train_loader = DataLoader(
         dataset            = train_dataset,
@@ -185,7 +188,9 @@ def build_loaders(cfg, train_dataset, val_dataset, distributed: bool):
         sampler            = train_sampler,
         shuffle            = (not distributed),
         num_workers        = num_workers,
+        prefetch_factor    = prefetch_factor,
         pin_memory         = True,
+        pin_memory_device  = pin_memory_device,
         persistent_workers = (num_workers > 0),
         collate_fn         = collate_fn,
         worker_init_fn     = _worker_init_fn,
@@ -197,7 +202,9 @@ def build_loaders(cfg, train_dataset, val_dataset, distributed: bool):
         sampler            = val_sampler,
         shuffle            = False,
         num_workers        = num_workers,
+        prefetch_factor    = prefetch_factor,
         pin_memory         = True,
+        pin_memory_device  = pin_memory_device,
         persistent_workers = (num_workers > 0),
         collate_fn         = collate_fn,
         worker_init_fn     = _worker_init_fn,
@@ -212,6 +219,7 @@ def run_training(cfg, args, device, local_rank, distributed, logger, writer):
     train_loader, val_loader = build_loaders(cfg, train_dataset, val_dataset, distributed)
 
     model = build_model(cfg).to(device)
+    print("Model architecture:\n", model)
 
     if is_main_process() and logger:
         log_training_hyperparams(cfg, logger)
@@ -238,7 +246,6 @@ def run_training(cfg, args, device, local_rank, distributed, logger, writer):
         "type"         : cfg["training"].get("scheduler", "warmup_cosine"),
     }
     scheduler = build_scheduler(optimizer, scheduler_cfg)
-
 
     trainer = Trainer(
         cfg          = cfg,
@@ -358,6 +365,7 @@ def run_logo_cv(cfg, args, device, local_rank, distributed, base_logger, base_wr
         train_loader, val_loader = build_loaders(cfg, train_dataset, val_dataset, distributed)
 
         model = build_model(cfg).to(device)
+        print("Model architecture:\n", model)
 
         if is_main_process() and fold_logger:
             log_training_hyperparams(cfg, fold_logger)

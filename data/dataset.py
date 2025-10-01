@@ -222,9 +222,7 @@ class GroupDynamicsDataset(Dataset):
                     npy_i_path = os.path.join(folder, f"Group{gid:02}_Person{pid}_Clip{clip_i+1}.npy")
                     arr = self._load_npy(npy_i_path)
                     feat_tensor = torch.tensor(arr, dtype=torch.float)
-                    # expected shape of the video features post temporal upsampling
-                    expected_len = (2 * self.snippet_length - self.len_overlap) * self.resample_freq
-                    mask_tensor = torch.ones([expected_len, feat_tensor.shape[1]])
+                    mask_tensor = torch.ones_like(feat_tensor)
                     all_feat.append(feat_tensor)
                     all_mask.append(mask_tensor)
                 # shape: (num_person, 57, ...)

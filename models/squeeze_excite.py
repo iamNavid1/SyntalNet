@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
+from models.utils import ChannelLayerNorm2d
 
 class ChannelGate(nn.Module):
     """
@@ -9,20 +10,25 @@ class ChannelGate(nn.Module):
     """
     def __init__(self, num_channels: int, reduction_ratio: int = 16):
         super().__init__()
-        hidden_channels = max(num_channels // reduction_ratio, 4)
-        self.fc1 = nn.Linear(num_channels, hidden_channels, bias=True)
-        self.relu = nn.ReLU()
-        self.fc2 = nn.Linear(hidden_channels, num_channels, bias=True)
+        hidden = max(num_channels // reduction_ratio, 4)
+        self.fc1 = nn.Linear(num_channels, hidden, bias=True)
+        self.act = nn.GELU()
+        self.fc2 = nn.Linear(hidden, num_channels, bias=True)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, C, T, F = x.shape
-        # squeeze spatial dims
-        y = x.view(B, C, -1).mean(dim=2)              # (B, C)
-        y = self.relu(self.fc1(y))                    # (B, hidden)
-        y = self.fc2(y)                               # (B, C)
-        # reshape and expand
-        y = y.view(B, C, 1, 1).expand(B, C, T, F)     # (B, C, T, F)
-        return y
+    def forward(self, x: torch.Tensor, m: [torch.Tensor] = None) -> torch.Tensor:
+        # x: (B,C,T,F); m: (B,1 or C,T,F) or None
+        if m is not None:
+            mC = (m if m.shape[1] == x.shape[1] else m.expand(-1, x.shape[1], -1, -1)).to(x.dtype)
+            num = (x * mC).sum(dim=(2,3))
+            den = mC.sum(dim=(2,3)).clamp_min(1e-6)
+            y = num / den                         # (B,C) masked mean
+        else:
+            y = x.view(x.shape[0], x.shape[1], -1).mean(dim=2)
+
+        y = self.act(self.fc1(y))
+        y = self.fc2(y)                           # (B,C)
+        return y.view(x.shape[0], x.shape[1], 1, 1).expand_as(x)
+
 
 
 class SpatialGate(nn.Module):
@@ -34,11 +40,14 @@ class SpatialGate(nn.Module):
         super().__init__()
         self.conv = nn.Conv2d(num_channels, 1, kernel_size=1, bias=True)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, C, T, F = x.shape
-        y = self.conv(x)                              # (B, 1, T, F)
-        y = y.expand(B, C, T, F)                      # (B, C, T, F)
-        return y
+    def forward(self, x: torch.Tensor, m: [torch.Tensor] = None) -> torch.Tensor:
+        if m is not None:
+            mC = (m if m.shape[1] == x.shape[1] else m.expand(-1, x.shape[1], -1, -1)).to(x.dtype)
+            x_in = x * mC
+        else:
+            x_in = x
+        y = self.conv(x_in)                       # (B,1,T,F)
+        return y.expand(x.shape[0], x.shape[1], x.shape[2], x.shape[3])
 
 
 class SEBlock(nn.Module):
@@ -55,25 +64,26 @@ class SEBlock(nn.Module):
         self.spatial_gate = SpatialGate(num_channels)
         self.sigmoid = nn.Sigmoid()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, C, T, F)
-        g_c = self.channel_gate(x)      # (B, C, T, F)
-        g_s = self.spatial_gate(x)      # (B, C, T, F)
-        gate = self.sigmoid(g_c + g_s)  # (B, C, T, F)
-        return x * gate
+    def forward(self, x: torch.Tensor, m: [torch.Tensor] = None) -> torch.Tensor:
+        gc = self.channel_gate(x, m)              # (B,C,T,F)
+        gs = self.spatial_gate(x, m)              # (B,C,T,F)
+        return x * self.sigmoid(gc + gs)
 
 
-class CrossSE(nn.Module):
+class SoSE_X(nn.Module):
     """
+    Social Squeeze-and-Excitation based Cross Fusion
     Applies a shared SE Block across P streams, then fuses each
     stream with the others via a learnable scalar residual coefficient.
     """
     def __init__(
         self,
         num_channels: int,
-        reduction_ratio: int = 16,
+        reduction_ratio: int = 8,
+        num_person: int = 3,
         init_alpha: float = 0.0,
-        dropout_p: float = 0.05
+        dropout_p: float = 0.05,
+        norm: bool = True,
     ):
         """
         :param num_channels: channels per stream after CNN backbone (C)
@@ -82,100 +92,70 @@ class CrossSE(nn.Module):
         :param dropout_p: dropout probability on the residual path
         """
         super().__init__()
+        self.P = num_person
         self.se = SEBlock(num_channels, reduction_ratio)
-        # learnable scalar controlling how much of the others' features to add
         self.alpha = nn.Parameter(torch.tensor(init_alpha, dtype=torch.float32))
-        # regularize the cross-person residual
         self.dropout = nn.Dropout(p=dropout_p)
+        self.pre_norm = ChannelLayerNorm2d(num_channels) if norm else nn.Identity()
+        self.res_norm = ChannelLayerNorm2d(num_channels) if norm else nn.Identity()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self._last_aux = None
+
+    def get_aux(self):
+        return self._last_aux
+
+    def forward(self, x: torch.Tensor, m: [torch.Tensor] = None) -> torch.Tensor:
         """
-        :param x: tensor of shape (B, P, C, T, F)
-        :return: tensor of same shape with cross-person fusion applied
+        x: (B*P, C, T, F)
+        m: (B*P, 1 or C, T, F) or None
         """
-        B, P, C, T, F = x.shape
+        BP, C, T, F = x.shape
+        assert BP % self.P == 0, "B*P mismatch in SoSE_X"
+        B = BP // self.P
 
-        # 1) Shared gating: apply SE block to each stream
-        x_flat = x.view(B * P, C, T, F)          # (B⋅P, C, T, F)
-        gated = self.se(x_flat)                  # (B⋅P, C, T, F)
-        gated = gated.view(B, P, C, T, F)        # (B, P, C, T, F)
+        # mask handling
+        if m is not None:
+            mB = m.view(B, self.P, m.shape[1], T, F)
+            mC = (mB if mB.shape[2] == C else mB.expand(B, self.P, C, T, F)).to(x.dtype)
+        else:
+            mC = None
 
-        # 2) Cross-person residual aggregation
-        #    for each p, sum the gated features of all others
-        sum_all = gated.sum(dim=1, keepdim=True) # (B, 1, C, T, F)
-        # subtract self to get sum_{j≠p}
-        others_sum = sum_all - gated             # (B, P, C, T, F)
+        # ---- pre-norm ----
+        x_in = self.pre_norm(x).view(B, self.P, C, T, F)
 
-        # 3) scale by α, apply dropout, add back to original x
-        residual = self.alpha * others_sum       # (B, P, C, T, F)
-        residual = self.dropout(residual)
-        out = x + residual                       # (B, P, C, T, F)
+        # ---- SE per person (masked) ----
+        x_gated = self.se(
+            x_in.view(B * self.P, C, T, F),
+            None if mC is None else mC.view(B * self.P, C, T, F)
+        ).view(B, self.P, C, T, F)
 
-        return out
+        # availability per person
+        if mC is None:
+            w = torch.ones(B, self.P, 1, T, F, device=x.device, dtype=x.dtype)
+        else:
+            w = (mC[:, :, :1] > 0).to(x.dtype)                  # (B,P,1,T,F)
 
+        # others' masked mean (exclude self)
+        xw = x_gated * w                                        # (B,P,C,T,F)
+        sum_all = xw.sum(dim=1, keepdim=True)                   # (B,1,C,T,F)
+        w_all   = w.sum(dim=1, keepdim=True).clamp_min(1e-6)    # (B,1,1,T,F)
 
-# === Example usage ===
+        sum_others = sum_all - xw                                # (B,P,C,T,F)
+        w_others   = (w_all - w).clamp_min(1e-6)                 # (B,P,1,T,F)
+        others_mean = sum_others / w_others                      # (B,P,C,T,F)
 
-if __name__ == "__main__":
-    Bsz       = 8
-    num_people = 3
-    C_in      = 1        # raw input channels
-    seq_len   = 190      # temporal dimension
-    dim_feat  = 1024     # feature dimension
+        # ---- residual norm/dropout/scale and add ----
+        res = self.res_norm(others_mean.view(B * self.P, C, T, F))
+        res = self.dropout(res)
+        res = res * self.alpha
 
-    # 1) A simple CNN backbone per person
-    class SimpleBackbone(nn.Module):
-        def __init__(self, in_channels, out_channels):
-            super().__init__()
-            self.conv = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-                nn.BatchNorm2d(out_channels),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
-                nn.BatchNorm2d(out_channels),
-                nn.ReLU(inplace=True),
-            )
-        def forward(self, x):
-            # x: (B, C_in, T, F)
-            return self.conv(x)  # (B, out_channels, T, F)
+        with torch.no_grad():
+            avail = w.mean().detach().cpu()  # mean availability over all people
+            res_mag = res.view(B, self.P, -1).norm(dim=2).mean().detach().cpu()
+            self._last_aux = {
+                "alpha": float(self.alpha.detach().cpu()),
+                "avail_per_person": avail,
+                "residual_mag": res_mag,
+            }
 
-    # 2) Full multi-person model
-    class MultiPersonModel(nn.Module):
-        def __init__(self, C_backbone=64):
-            super().__init__()
-            self.backbone = SimpleBackbone(C_in, C_backbone)
-            self.fusion   = CrossSE(
-                num_channels=C_backbone,
-                reduction_ratio=16,
-                init_alpha=0.0,
-                dropout_p=0.05
-            )
-            # example task head: global pooling + classifier
-            self.head = nn.Sequential(
-                nn.AdaptiveAvgPool2d((1, 1)),    # pool (T, F) to (1,1)
-                nn.Flatten(),                    # (B⋅P, C_backbone)
-                nn.Linear(C_backbone, 10)        # e.g., 10 classes per person
-            )
-
-        def forward(self, x):
-            # x: (B, P, C_in, T, F)
-            B, P, C_in, T, F = x.shape
-            # apply backbone per person by folding P into batch
-            x_flat = x.view(B * P, C_in, T, F)
-            feat    = self.backbone(x_flat)           # (B⋅P, C_backbone, T, F)
-            feat    = feat.view(B, P, feat.size(1), T, F)
-
-            # shared CSSE + cross-person fusion
-            fused = self.fusion(feat)                 # (B, P, C_backbone, T, F)
-
-            # classification head per person
-            fused_flat = fused.view(B * P, feat.size(1), T, F)
-            logits     = self.head(fused_flat)        # (B⋅P, 10)
-            logits     = logits.view(B, P, -1)        # (B, P, 10)
-            return logits
-
-    # instantiate and test
-    model = MultiPersonModel(num_people)
-    dummy = torch.randn(Bsz, num_people, C_in, seq_len, dim_feat)
-    out = model(dummy)
-    print("Output shape:", out.shape)  # expect (Bsz, num_people, 10)
+        return x + res

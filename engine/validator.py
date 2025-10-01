@@ -104,6 +104,7 @@ class Validator:
         )
 
     def _get_head_specs(self, model):
+        model = getattr(model, "module", model)
         specs: Dict[str, Dict[str, int]] = {}
         if getattr(model, "individual_classifier", None) is not None:
             specs["individual"] = {name: clf.K for name, clf in model.individual_classifier.classifiers.items()}
@@ -113,20 +114,23 @@ class Validator:
         return specs
 
     def _build_metric_sets(self, model):
+        model = getattr(model, "module", model)
         metric_sets: Dict[str, Dict[str, Dict[str, torch.nn.Module]]] = {}
 
         if getattr(model, "individual_classifier", None) is not None:
             metric_sets["individual"] = {}
+            num_classes = model.individual_classifier.K
             for name, clf in model.individual_classifier.classifiers.items():
-                metrics = build_classification_metrics(clf.K)
+                metrics = build_classification_metrics(num_classes)
                 for m in metrics.values():
                     m.to(self.device)
                 metric_sets["individual"][name] = metrics
 
         if getattr(model, "group_classifier", None) is not None:
             metric_sets["group"] = {}
+            num_classes = model.group_classifier.K
             for name, clf in model.group_classifier.classifiers.items():
-                metrics = build_classification_metrics(clf.K)
+                metrics = build_classification_metrics(num_classes)
                 for m in metrics.values():
                     m.to(self.device)
                 metric_sets["group"][name] = metrics
@@ -244,15 +248,13 @@ class Validator:
             for name, K in head_specs[split].items():
                 lg_list = [None for _ in range(world_size)]
                 y_list = [None for _ in range(world_size)]
-                lg_list = dist.all_gather_object(lg_list, buffers[split][name]["logits"])
-                y_list = dist.all_gather_object(y_list, buffers[split][name]["targets"])
+                dist.all_gather_object(lg_list, buffers[split][name]["logits"])
+                dist.all_gather_object(y_list, buffers[split][name]["targets"])
                 if rank == 0:
-                    lg_all = torch.cat([x for x in lg_list if x is not None and x.numel() > 0], dim=0) if any(
-                        (x is not None and x.numel() > 0) for x in lg_list
-                    ) else torch.empty(0, K)
-                    y_all = torch.cat([x for x in y_list if x is not None and x.numel() > 0], dim=0) if any(
-                        (x is not None and x.numel() > 0) for x in y_list
-                    ) else torch.empty(0, dtype=torch.long)
+                    lg_all = torch.cat([x for x in lg_list if x is not None and x.numel() > 0], dim=0) \
+                        if any((x is not None and x.numel() > 0) for x in lg_list) else torch.empty(0, K)
+                    y_all = torch.cat([x for x in y_list if x is not None and x.numel() > 0], dim=0) \
+                        if any((x is not None and x.numel() > 0) for x in y_list) else torch.empty(0, dtype=torch.long)
                     gathered[split][name] = (lg_all, y_all)
 
         return gathered if rank == 0 else None
