@@ -1,17 +1,82 @@
-import numpy as np
+import copy
 import torch
 import torch.nn as nn
 from torch.nn.modules.utils import _pair
 from typing import List, Tuple, Dict, Optional, Any, Type
 
 from models.base_model import BaseModel
-from models.squeeze_excite import SoSE_X
-from models.fusion import BSX, GLRFusion
+from models.fusion import BSC_X, GLR_X, SoSE_X
+from models.utils import ChannelLayerNorm2d
 from models.classifier import ClassificationHead
 from models.encoder import CNXv2Block, StageTransition
 from models.partial import PartialAvgPool2d, PartialGeM
 
+from models.builders import build_multichannel_fusion
 
+# -----------------------------------------------------------------------------
+#                                Specifications
+# -----------------------------------------------------------------------------
+
+VALID_MODALITIES = [
+    "face", "pose", "video",
+    "turns", "utterance",
+    "sentiment", "prosody", "audio",
+]
+
+VALID_BRANCHES = ["Videokinetic", "Dialogue", "Acoustic"]
+
+BRANCH_MODALITIES: Dict[str, List[str]] = {
+    "Videokinetic": ["video", "face", "pose"],
+    "Dialogue": ["utterance", "turns"],
+    "Acoustic": ["audio", "prosody", "sentiment"],
+}
+
+MODALITY_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    'video': dict(
+        in_ch=1024, stage_chs=[96], num_stages=3, stage_depth=[1,1,2],
+        ks=[[(5,1)], [(7,1)], [(7,1)]], pd=[[(2,0)], [(3,0)], [(3,0)]],
+        st=[[1]], dl=[[1]], interp=True, pool=[None],
+    ),
+    'face': dict(
+        in_ch=212, stage_chs=[80], num_stages=3, stage_depth=[1,1,2],
+        ks=[[(5,1)], [(7,1)], [(7,1)]], pd=[[(2,0)], [(3,0)], [(3,0)]],
+        st=[[1]], dl=[[1]], interp=False, pool=[None],
+    ),
+    'pose': dict(
+        in_ch=182, stage_chs=[80], num_stages=3, stage_depth=[1,1,2],
+        ks=[[(5,1)], [(7,1)], [(7,1)]], pd=[[(2,0)], [(3,0)], [(3,0)]],
+        st=[[1]], dl=[[1]], interp=False, pool=[None],
+    ),
+    'utterance': dict(
+        in_ch=1024, stage_chs=[96], num_stages=3, stage_depth=[1,1,2],
+        ks=[[(3,1)], [(3,1)], [(5,1)]], pd=[[(1,0)], [(1,0)], [(2,0)]],
+        st=[[1]], dl=[[1]], interp=False, pool=[None],
+    ),
+    'turns': dict(
+        in_ch=12, stage_chs=[80], num_stages=3, stage_depth=[1],
+        ks=[[(3,1)], [(3,1)], [(5,1)]], pd=[[(1,0)], [(1,0)], [(2,0)]],
+        st=[[1]], dl=[[1]], interp=False, pool=[None],
+    ),
+    'audio': dict(
+        in_ch=512, stage_chs=[96], num_stages=3, stage_depth=[1,1,2],
+        ks=[[(5,1)], [(7,1)], [(7,1)]], pd=[[(2,0)], [(3,0)], [(3,0)]],
+        st=[[1]], dl=[[1]], interp=False, pool=[None],
+    ),
+    'sentiment': dict(
+        in_ch=5, stage_chs=[48], num_stages=3, stage_depth=[1],
+        ks=[[(5,1)], [(7,1)], [(7,1)]], pd=[[(2,0)], [(3,0)], [(3,0)]],
+        st=[[1]], dl=[[1]], interp=False, pool=[None],
+    ),
+    'prosody': dict(
+        in_ch=7, stage_chs=[48], num_stages=3, stage_depth=[1],
+        ks=[[(5,1)], [(7,1)], [(7,1)]], pd=[[(2,0)], [(3,0)], [(3,0)]],
+        st=[[1]], dl=[[1]], interp=False, pool=[None],
+    ),
+}
+
+# -----------------------------------------------------------------------------
+#                                Encoder Blocks
+# -----------------------------------------------------------------------------
 class EncoderStage(nn.Module):
     """
     One stage with:
@@ -74,12 +139,14 @@ class EncoderStage(nn.Module):
             x, m = self.temporal_pool(x, m)
         return x, m
 
-
+# -----------------------------------------------------------------------------
+#                              Encoder Backbone
+# -----------------------------------------------------------------------------
 class EncoderBackbone(nn.Module):
     """
     Multi-stage encoder:
       - optional stem StageTransition to first stage width
-      - per stage: EncoderStage -> optional CrossSE -> optional StageTransition to next stage
+      - per stage: EncoderStage -> optional SoSE-X -> optional StageTransition to next stage
     """
     def __init__(
         self,
@@ -116,7 +183,6 @@ class EncoderBackbone(nn.Module):
         self.stage_pool = stage_pool
 
         self.num_stages = num_stages
-        self.apply_mp_fusion = apply_mp_fusion
 
         first_C = stage_channels[0]
         self.stem = StageTransition(in_channels, first_C) \
@@ -127,7 +193,7 @@ class EncoderBackbone(nn.Module):
         dp_rates = torch.linspace(0.0, p_droppath, total_blocks).tolist()
 
         self.stages = nn.ModuleList()
-        self.cross  = nn.ModuleList()
+        self.mp_fusion  = nn.ModuleList()
         self.trans  = nn.ModuleList()
 
         cur = 0
@@ -152,10 +218,10 @@ class EncoderBackbone(nn.Module):
             )
             self.stages.append(stage_i)
 
-            if apply_mp_fusion:
-                self.cross.append(SoSE_X(num_channels=stage_channels[i], dropout_p=p_drop))
+            if apply_mp_fusion and i == num_stages-1:
+                self.mp_fusion.append(SoSE_X(num_channels=stage_channels[i], dropout_p=p_drop))
             else:
-                self.cross.append(nn.Identity())
+                self.mp_fusion.append(nn.Identity())
 
             if i < num_stages - 1:
                 if stage_channels[i] != stage_channels[i + 1]:
@@ -180,7 +246,7 @@ class EncoderBackbone(nn.Module):
         if self.stem is not None:
             x, m = self.stem(x, m)
 
-        for stage, fusion, transition in zip(self.stages, self.cross, self.trans):
+        for stage, fusion, transition in zip(self.stages, self.mp_fusion, self.trans):
             x, m = stage(x, m)
             if not isinstance(fusion, nn.Identity):
                 x = fusion(x, m)
@@ -192,7 +258,9 @@ class EncoderBackbone(nn.Module):
 
         return x, m
 
-
+# -----------------------------------------------------------------------------
+#                                   Branch
+# -----------------------------------------------------------------------------
 class Branch(nn.Module):
     def __init__(
         self,
@@ -211,8 +279,9 @@ class Branch(nn.Module):
         p_drop_block: float = 0.05,
         p_droppath_block: float = 0.0,
         activation_block: Type[nn.Module] = nn.GELU,
-        # fusion 
-        cross_se: bool = True,
+        # fusion
+        mc_fusion_type: str = "bscx",
+        mp_fusion: bool = True,
         shared_dim: int = 128,
         # p_drop_proj: float = 0.1,
         # activation_proj: Type[nn.Module] = nn.GELU,
@@ -241,7 +310,7 @@ class Branch(nn.Module):
                 act            = activation_block,
                 p_drop         = p_drop_block,
                 p_droppath     = p_droppath_block,
-                apply_mp_fusion= cross_se,
+                apply_mp_fusion= mp_fusion,
             )
             self.encoders[m] = enc
 
@@ -253,11 +322,11 @@ class Branch(nn.Module):
         self.mods_order = list(self.mods)
         Cins = [mod_stage_chs[m][-1] for m in self.mods_order]
         if len(self.mods) > 1:
-            self.mc_fusion = BSX(
-                Cin_list  = Cins,
-                C         = shared_dim,
-                use_block = True,
-                out_dim   = shared_dim,
+            self.mc_fusion = build_multichannel_fusion(
+                variant    = mc_fusion_type,
+                Cin_list   = Cins,
+                C          = shared_dim,
+                out_dim    = shared_dim,
             )
             self.single_pool = None
         else:
@@ -299,8 +368,8 @@ class Branch(nn.Module):
                 x = xN.permute(0, 2, 1).reshape(B, P, xN.shape[-1], xN.shape[-2])  # (B,P,T',F)
 
                 mN = mk.permute(0, 1, 3, 2).reshape(N, mk.shape[-1], mk.shape[-2]).to(xN.dtype)  # (N, F, T)
-                mN = torch.nn.functional.interpolate(mN, size=xN.shape[-1], mode='nearest')                          # (N, F, T')
-                mk = mN.permute(0, 2, 1).reshape(B, P, mN.shape[-1], mN.shape[-2])                # (B,P,T',F)
+                mN = torch.nn.functional.interpolate(mN, size=xN.shape[-1], mode='nearest')      # (N, F, T')
+                mk = mN.permute(0, 2, 1).reshape(B, P, mN.shape[-1], mN.shape[-2])               # (B,P,T',F)
 
             # encoder expects (B,P,F,T,1)
             x = x.permute(0, 1, 3, 2).unsqueeze(-1)  # (B,P,F,T',1)
@@ -317,7 +386,7 @@ class Branch(nn.Module):
         if self.mc_fusion is not None:
             z_branch = self.mc_fusion(Zs, Ms)                           # (N, shared_dim)
         else:
-            # single modality path (match BSX head behavior)
+            # single modality path (match BSC_X head behavior)
             Z, M = Zs[0], Ms[0]
             mean = (Z*M).sum(dim=(2,3)) / M.sum(dim=(2,3)).clamp_min(1e-6)
             gem  = self.single_pool["gem"](Z, M)
@@ -326,20 +395,24 @@ class Branch(nn.Module):
 
         return z_branch  # shape (B*P, shared_dim)
 
-
+# -----------------------------------------------------------------------------
+#                                  SyntalNet
+# -----------------------------------------------------------------------------
 class SyntalNet(BaseModel):
     def __init__(
         self,
         modalities: Optional[List[str]] = None,
         branches: Optional[List[str]] = None,
         shared_dim: int = 128,
+        # in-branch fusion
+        mc_fusion_type: str = "bscx",
         # cross-branch fusion
         rank_pair: int = 12,
         alloc_hidden: int = 24,
         # encoder / stage hyperparams
         p_drop_block: float = 0.12,
         p_droppath_block: float = 0.0,
-        cross_se: bool = True,
+        mp_fusion: bool = True,
         # classification
         ind_cls_heads: Tuple[str, ...] = (),
         grp_cls_heads: Tuple[str, ...] = (),
@@ -356,65 +429,22 @@ class SyntalNet(BaseModel):
         super().__init__()
 
         # ----------------------- defaults -----------------------
-        modalities = modalities or ["face", "pose", "video", "turns", "utterance", "sentiment", "prosody", "audio"]
-        branches = branches or ['Videokinetic', 'Dialogue', 'Acoustic']
+        modalities = modalities or list(VALID_MODALITIES)
+        branches = branches or list(VALID_BRANCHES)
 
-        valid_modalities = ["face", "pose", "video", "turns", "utterance", "sentiment", "prosody", "audio"]
-        valid_branches = {'Videokinetic', 'Dialogue', 'Acoustic'}
-        if not set(modalities).issubset(valid_modalities):
+        if not set(modalities).issubset(VALID_MODALITIES):
             raise ValueError("modalities must be drawn from {'face', 'pose', 'video', 'turns', 'utterance', 'sentiment', 'prosody', 'audio'}")
-        if not set(branches).issubset(valid_branches):
+        if not set(branches).issubset(VALID_BRANCHES):
             raise ValueError("branches must be drawn from {'Videokinetic','Dialogue','Acoustic'}")
 
         branch_modalities = {
-            "Videokinetic": ["video", "face", "pose"],
-            "Dialogue"    : ["utterance", "turns"],
-            "Acoustic"    : ["audio", "prosody", "sentiment"],
+            name: [m for m in BRANCH_MODALITIES[name] if m in modalities]
+            for name in BRANCH_MODALITIES
         }
-        for k in list(branch_modalities.keys()):
-            branch_modalities[k] = [m for m in branch_modalities[k] if m in modalities]
 
         _per_modality_defaults = {
-            'video': dict(
-                in_ch=1024, stage_chs=[96], num_stages=3, stage_depth=[1,1,2],
-                ks=[[(5,1)], [(7,1)], [(7,1)]], pd=[[(2,0)], [(3,0)], [(3,0)]],
-                st=[[1]], dl=[[1]], interp=True, pool=[None],
-            ),
-            'face': dict(
-                in_ch=212, stage_chs=[80], num_stages=3, stage_depth=[1,1,2],
-                ks=[[(5,1)], [(7,1)], [(7,1)]], pd=[[(2,0)], [(3,0)], [(3,0)]],
-                st=[[1]], dl=[[1]], interp=False, pool=[None],
-            ),
-            'pose': dict(
-                in_ch=182, stage_chs=[80], num_stages=3, stage_depth=[1,1,2],
-                ks=[[(5,1)], [(7,1)], [(7,1)]], pd=[[(2,0)], [(3,0)], [(3,0)]],
-                st=[[1]], dl=[[1]], interp=False, pool=[None],
-            ),
-            'utterance': dict(
-                in_ch=1024, stage_chs=[96], num_stages=3, stage_depth=[1,1,2],
-                ks=[[(3,1)], [(3,1)], [(5,1)]], pd=[[(1,0)], [(1,0)], [(2,0)]],
-                st=[[1]], dl=[[1]], interp=False, pool=[None],
-            ),
-            'turns': dict(
-                in_ch=12, stage_chs=[80], num_stages=3, stage_depth=[1],
-                ks=[[(3,1)], [(3,1)], [(5,1)]], pd=[[(1,0)], [(1,0)], [(2,0)]],
-                st=[[1]], dl=[[1]], interp=False, pool=[None],
-            ),
-            'audio': dict(
-                in_ch=512, stage_chs=[96], num_stages=3, stage_depth=[1,1,2],
-                ks=[[(5,1)], [(7,1)], [(7,1)]], pd=[[(2,0)], [(3,0)], [(3,0)]],
-                st=[[1]], dl=[[1]], interp=False, pool=[None],
-            ),
-            'sentiment': dict(
-                in_ch=5, stage_chs=[48], num_stages=3, stage_depth=[1],
-                ks=[[(5,1)], [(7,1)], [(7,1)]], pd=[[(2,0)], [(3,0)], [(3,0)]],
-                st=[[1]], dl=[[1]], interp=False, pool=[None],
-            ),
-            'prosody': dict(
-                in_ch=7, stage_chs=[48], num_stages=3, stage_depth=[1],
-                ks=[[(5,1)], [(7,1)], [(7,1)]], pd=[[(2,0)], [(3,0)], [(3,0)]],
-                st=[[1]], dl=[[1]], interp=False, pool=[None],
-            ),
+            k: copy.deepcopy(MODALITY_DEFAULTS[k])
+            for k in MODALITY_DEFAULTS
         }
 
         # ----------------------- build branches -----------------------
@@ -441,13 +471,13 @@ class SyntalNet(BaseModel):
                 num_stages=mod_num_stages, stage_depths=mod_stage_depths,
                 ks=ks, st=st, pd=pd, dl=dl, pool=pool, interp=interp,
                 p_drop_block=p_drop_block, p_droppath_block=p_droppath_block,
-                cross_se=cross_se, shared_dim=shared_dim,
+                mc_fusion_type=mc_fusion_type, mp_fusion=mp_fusion, shared_dim=shared_dim,
             )
  
         # ----------------------- multimodal fusion -----------------------
         M = len(self.branches)
         if M > 1:
-            self.mm_fusion = GLRFusion(
+            self.mm_fusion = GLR_X(
                 num_mod      = M,
                 dims_mod     = shared_dim,
                 rank_pair    = rank_pair,

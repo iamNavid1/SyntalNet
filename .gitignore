@@ -4,6 +4,7 @@
 *.npy
 *.pth
 *.json
+*.png
 
 # scripts
 *.sh

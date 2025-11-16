@@ -55,8 +55,9 @@ class Trainer:
         self.autocast_kwargs = BuildAutocastKWargs(cfg, device)
         self.scaler = self._build_grad_scaler()
 
+        self.grp_as_ind = cfg.get("dataset").get("grp_as_ind", False)
         counts_cfg = cfg.get("dataset").get("cls_count_dir")
-        label_type = cfg.get("dataset").get("args").get("label_type")
+        label_type = cfg.get("dataset").get("args").get("label_type", "kernel")
         smoothing = cfg.get("training").get("label_smoothing", 0.0)
         beta = cfg.get("training").get("cb_beta", 0.999)
         gamma = cfg.get("training").get("focal_gamma", 3.0)
@@ -64,7 +65,7 @@ class Trainer:
         tau = cfg.get("training").get("la_tau", 0.)
         self.criteria = self._build_criteria(loss_type, counts_cfg, label_type, smoothing, beta, gamma, tau)
 
-        self.validator = Validator(self.device, self.autocast_kwargs)
+        self.validator = Validator(self.device, self.autocast_kwargs, self.grp_as_ind)
 
         self.track_fusion = bool(cfg.get("training", {}).get("track_fusion_aux", False))
         self.track_classifier_aux = bool(cfg.get("training", {}).get("track_classifier_aux", False))
@@ -179,7 +180,7 @@ class Trainer:
         torch.save(state, path)
 
 
-    def resume_from(self, path: str) -> int:
+    def resume_from(self, path: str) -> dict:
         state = torch.load(path, map_location=self.device)
         getattr(self.model, "module", self.model).load_state_dict(state["model"])
         self.optimizer.load_state_dict(state["optimizer"])
@@ -210,7 +211,7 @@ class Trainer:
             batch_data = modalities_to_branches(batch_data)
             batch_labels = {k: v.to(self.device) for k, v in batch_labels.items()}
 
-            ind_label, grp_label = self._prepare_label_views(batch_labels)
+            ind_label, grp_label = self._prepare_label_views(batch_labels, self.grp_as_ind)
 
             with autocast(**self.autocast_kwargs):
                 features, logits = self.model(batch_data, epoch=epoch)
@@ -222,7 +223,7 @@ class Trainer:
                 self.model.update_prototypes(features, proto_targets)
 
             mp_aux, mc_fusion_aux, mm_fusion_aux = self._get_fusion_aux()
-            classifier_aux_data = self._get_classifier_aux()
+            classifier_aux_data, ind_classifier, grp_classifier = self._get_classifier_aux()
 
             do_sync = ((step + 1) % self.accum_steps == 0)
             ctx = self.model.no_sync() if (is_ddp and not do_sync) else contextlib.nullcontext()
@@ -251,7 +252,7 @@ class Trainer:
                 for i, pg in enumerate(self.optimizer.param_groups):
                     self.writer.add_scalar(f"train/lr_group{i}", pg.get("lr", 0.0), self.global_step+1)
                 self._maybe_log_fusion_aux(mp_aux, mc_fusion_aux, mm_fusion_aux, self.global_step+1)
-                self._maybe_log_classifier_aux(classifier_aux_data, self.global_step+1)
+                self._maybe_log_classifier_aux(classifier_aux_data, ind_classifier, grp_classifier, self.global_step+1)
                 interval_loss = 0.0
                 interval_count = 0
             self.global_step += 1
@@ -266,7 +267,7 @@ class Trainer:
             )
             self.writer.add_scalar("train/loss_step", avg_loss, self.global_step+1)
             self._maybe_log_fusion_aux(mp_aux, mc_fusion_aux, mm_fusion_aux, self.global_step+1)
-            self._maybe_log_classifier_aux(classifier_aux_data, self.global_step+1)
+            self._maybe_log_classifier_aux(classifier_aux_data, ind_classifier, grp_classifier, self.global_step+1)
 
         if running_count > 0 and self._is_main():
             epoch_loss = running_loss / running_count
@@ -274,14 +275,28 @@ class Trainer:
             self.writer.add_scalar("train/loss", epoch_loss, epoch+1)
 
 
-    def _prepare_label_views(self, labels: Dict[str, torch.Tensor]):
+    def _prepare_label_views(
+        self, 
+        labels: Dict[str, torch.Tensor],
+        groups_as_individuals: bool = False
+    ):
         ind_label = None
         grp_label = None
+
         if "individual" in labels:
             B, P, L = labels["individual"].shape
             ind_label = labels["individual"].view(B * P, L)
+        else:
+            B = P = L = None
+
         if "group" in labels:
-            grp_label = labels["group"]
+            if groups_as_individuals:
+                grp_label_expanded = labels["group"].repeat_interleave(P, dim=0)
+                ind_label = torch.cat([ind_label, grp_label_expanded], dim=-1) \
+                    if ind_label is not None else grp_label_expanded
+            else:
+                grp_label = labels["group"]
+
         return ind_label, grp_label
 
 
@@ -305,6 +320,7 @@ class Trainer:
                 loss = self.criteria["group"][name](lg, y)
                 total_loss = loss if total_loss is None else total_loss + loss
 
+        assert total_loss is not None, "No logits matched labels to compute loss."
         return total_loss
 
 
@@ -369,6 +385,9 @@ class Trainer:
             with open(counts_cfg, "r") as f:
                 counts_cfg = yaml.safe_load(f)
         counts_cfg = counts_cfg.get(label_type)
+        if self.grp_as_ind and "group" in counts_cfg and "individual" in counts_cfg:
+            for key, values in counts_cfg["group"].items():
+                counts_cfg["individual"][key] = [v * 3 for v in values]
 
         specs = []
         if getattr(self.model, "individual_classifier", None) is not None:
@@ -438,6 +457,7 @@ class Trainer:
         model_ref = getattr(self.model, "module", self.model)
         classifier_aux = {}
         
+        ind_classifier = None
         if hasattr(model_ref, "individual_classifier") and model_ref.individual_classifier is not None:
             ind_classifier = model_ref.individual_classifier
             if hasattr(ind_classifier, "classifiers") and hasattr(ind_classifier, "classifier_type"):
@@ -452,6 +472,7 @@ class Trainer:
                     if ind_aux:
                         classifier_aux["individual"] = ind_aux
         
+        grp_classifier = None
         if hasattr(model_ref, "group_classifier") and model_ref.group_classifier is not None:
             grp_classifier = model_ref.group_classifier
             if hasattr(grp_classifier, "classifiers") and hasattr(grp_classifier, "classifier_type"):
@@ -466,7 +487,7 @@ class Trainer:
                     if grp_aux:
                         classifier_aux["group"] = grp_aux
         
-        return classifier_aux
+        return classifier_aux, ind_classifier, grp_classifier
 
 
     def _maybe_log_gradients(self, step_opt: int) -> None:
@@ -541,12 +562,9 @@ class Trainer:
             for br_enc_stg, aux in mp_aux.items():
                 if aux is None:
                     continue
-                if "alpha" in aux:
-                    self.writer.add_scalar(f"fusion/mp_{br_enc_stg}/alpha", float(aux["alpha"]), step)
-                if "residual_mag" in aux:
-                    self.writer.add_scalar(f"fusion/mp_{br_enc_stg}/residual_mag", float(aux["residual_mag"]), step)
-                if "avail_per_person" in aux:
-                    self.writer.add_scalar(f"fusion/mp_{br_enc_stg}/avail_per_person", float(aux["avail_per_person"]), step)
+                for k in ["alpha_mean", "alpha_min", "alpha_max", "residual_mag", "x_mag", "avail_per_person"]:
+                    if k in aux:
+                        self.writer.add_scalar(f"fusion_mp/{br_enc_stg}/{k}", float(aux[k]), step)
 
         # --- BSX (per branch) ---
         if mc_aux is not None:
@@ -554,14 +572,14 @@ class Trainer:
                 if aux is None: 
                     continue
                 if "mask_cov_overall" in aux:
-                    self.writer.add_scalar(f"fusion/mc_{br_name}/mask_cov_overall", float(aux["mask_cov_overall"]), step)
+                    self.writer.add_scalar(f"fusion_mc/{br_name}/mask_cov_overall", float(aux["mask_cov_overall"]), step)
                 if "mask_cov_per_stream" in aux:
                     v = aux["mask_cov_per_stream"].numpy()
                     for i, vi in enumerate(v):
-                        self.writer.add_scalar(f"fusion/mc_{br_name}/mask_cov_stream_{i}", float(vi), step)
-                for k in ["mean_norm", "gem_norm", "vec_norm"]:
+                        self.writer.add_scalar(f"fusion_mc/{br_name}/mask_cov_stream_{i}", float(vi), step)
+                for k in ["norm_mean", "norm_gem", "norm_vec"]:
                     if k in aux:
-                        self.writer.add_scalar(f"fusion/mc_{br_name}/{k}", float(aux[k]), step)
+                        self.writer.add_scalar(f"fusion_mc/{br_name}/{k}", float(aux[k]), step)
 
         # --- GLR (cross-branch) ---
         if mm_aux is not None:
@@ -569,23 +587,29 @@ class Trainer:
                 alloc = mm_aux["alloc"].numpy()  # (B,M)
                 alloc_mean = alloc.mean(axis=0)
                 for i, mi in enumerate(alloc_mean):
-                    self.writer.add_scalar(f"fusion/mm_alloc/branch_{i}", float(mi), step)
+                    self.writer.add_scalar(f"fusion_mm/alloc/branch_{i}", float(mi), step)
                 # optional: histogram over batch
                 for i in range(alloc.shape[1]):
-                    self.writer.add_histogram(f"fusion/mm_alloc_hist/branch_{i}", torch.tensor(alloc[:, i]), step)
+                    self.writer.add_histogram(f"fusion_mm/alloc_hist/branch_{i}", torch.tensor(alloc[:, i]), step)
 
             if "gate" in mm_aux and mm_aux["gate"] is not None:
                 gate = mm_aux["gate"].numpy()
                 gate_mean = gate.mean(axis=0)
                 for i, gi in enumerate(gate_mean):
-                    self.writer.add_scalar(f"fusion/mm_gate/branch_{i}", float(gi), step)
+                    self.writer.add_scalar(f"fusion_mm/gate/branch_{i}", float(gi), step)
 
-            for k in ["pair_mag", "sum_mag", "head_mag", "beta"]:
+            for k in ["pair_mag", "sum_mag", "res_mag", "head_mag", "beta", "gamma_res"]:
                 if k in mm_aux:
-                    self.writer.add_scalar(f"fusion/mm_{k}", float(mm_aux[k]), step)
+                    self.writer.add_scalar(f"fusion_mm/{k}", float(mm_aux[k]), step)
 
 
-    def _maybe_log_classifier_aux(self, classifier_aux: Dict[str, Dict[str, Dict[str, torch.Tensor]]], step: int) -> None:
+    def _maybe_log_classifier_aux(
+        self, 
+        classifier_aux: Dict[str, Dict[str, Dict[str, torch.Tensor]]], 
+        ind_classifier: Optional[nn.Module], 
+        grp_classifier: Optional[nn.Module], 
+        step: int
+    ) -> None:
         if self.log_interval <= 0:
             return
         if self.optim_step % self.log_interval != 0:
@@ -608,3 +632,17 @@ class Trainer:
                             float(fuse_sigmoid[class_idx]), 
                             step
                         )
+        for classifier, prefix in [
+            (ind_classifier, "individual"),
+            (grp_classifier, "group"),
+        ]:
+            if classifier is not None and hasattr(classifier, "classifiers") and hasattr(classifier, "classifier_type"):
+                if classifier.classifier_type == "cosine":
+                    for head_name in classifier.heads:
+                        head_classifier = classifier.classifiers[head_name]
+                        if hasattr(head_classifier, "cosine_proto_metrics"):
+                            metrics = head_classifier.cosine_proto_metrics()
+                            for lab, val in metrics.items():
+                                self.writer.add_scalar(
+                                    f"classifier/{prefix}_{head_name}_{lab}", float(val), step
+                                )

@@ -9,6 +9,15 @@ from typing import List, Optional, Dict
 from models.utils import MLP, GatedMLP, LoRA
 
 
+FUSION_WEIGHT_DEFAULTS: Dict[str, List[float]] = {
+    'Engagement': [-0.619, -1.386, -0.619],
+    'Lead': [-1.734, -1.386, -1.734],
+    'Synchrony': [0.405, 0.847, 0.405],
+    'Confidence': [0.405, 0.847, 0.405],
+    'Transition': [0.405, 0.847, 0.405],
+}
+
+
 class CosineProtoClassifier(nn.Module):
     """
     Per-label K-class cosine classifier with optional EMA prototypes and per-class fusion.
@@ -25,7 +34,7 @@ class CosineProtoClassifier(nn.Module):
         use_prototypes: bool = True,
         init_scale_proto: float = 8.0,
         proto_momentum: float = 0.96,
-        fuse_init: float | List[float] = [-1.734, -1.386, -1.734],
+        fuse_init: float | List[float] = 0.0,
         warmup_epochs: int = 5,
         learn_temperature: bool = True,
         init_temperature: float = 1.2,
@@ -71,7 +80,7 @@ class CosineProtoClassifier(nn.Module):
 
     @torch.no_grad()
     def update_prototypes(self, z: torch.Tensor, y: torch.Tensor):
-        if not self.use_prototypes:
+        if (not self.training) or (not self.use_prototypes):
             return
         
         z = F.normalize(z.float(), dim=-1)
@@ -118,7 +127,7 @@ class CosineProtoClassifier(nn.Module):
 
             # compute prototype scale and logits
             s_proto = torch.exp(self.log_scale_proto).clamp(5., 50.)
-            s_proto = s_proto * max(1e-6, w)  # ramp prototype scale
+            # s_proto = s_proto * max(1e-6, w)  # ramp prototype scale
             logits_proto = self._cos_logits(z, self.prototypes, s_proto)
 
             # mask unseen classes for prototypes
@@ -152,6 +161,38 @@ class CosineProtoClassifier(nn.Module):
         """Return auxiliary data for tracking."""
         return self._last_aux
 
+    @torch.no_grad()
+    def cosine_proto_metrics(self):
+        K = self.K
+        device = self.centroid.device
+
+        C = F.normalize(self.centroid, dim=-1)
+        P = F.normalize(self.prototypes, dim=-1) if self.use_prototypes else None
+
+        pair_idx = torch.combinations(torch.arange(K, device=device), r=2)
+        pair_labels = [f"{i.item()+1}-{j.item()+1}" for i, j in pair_idx]
+
+        cent_pairs = (C[pair_idx[:, 0]] * C[pair_idx[:, 1]]).sum(dim=-1)
+        out: Dict[str, torch.Tensor] = {}
+        for lab, val in zip(pair_labels, cent_pairs):
+            out[f"cent_{lab}"] = val.detach()
+
+        if P is not None:
+            seen = (self.proto_counts.to(device) > 0)
+            proto_pairs = (P[pair_idx[:, 0]] * P[pair_idx[:, 1]]).sum(dim=-1)
+            valid = torch.logical_and(seen[pair_idx[:, 0]], seen[pair_idx[:, 1]])
+            proto_pairs = torch.where(valid, proto_pairs, torch.full_like(proto_pairs, float('nan')))
+            for lab, val in zip(pair_labels, proto_pairs):
+                out[f"proto_{lab}"] = val.detach()
+        
+            # agreement: centroid vs prototype per class
+            agree_diag = (C * P).sum(dim=-1)
+            agree_diag = torch.where(seen, agree_diag, torch.full_like(agree_diag, float('nan')))
+            for i, val in enumerate(agree_diag):
+                out[f"agree_{i+1}"] = val.detach()
+
+        return out
+
 
 class DeepSetsTrunk(nn.Module):
     def __init__(
@@ -164,6 +205,7 @@ class DeepSetsTrunk(nn.Module):
         p_drop_trunk: float = 0.15,
     ):
         super().__init__()
+        self.norm = nn.LayerNorm(dim_person)
         # per-person embedding: D -> d_phi
         self.phi = MLP(dim_person, d_phi_h, d_phi, p_drop=0.1)
         # set aggregator: mean over persons, then map back to D
@@ -180,9 +222,10 @@ class DeepSetsTrunk(nn.Module):
         z_person: (B, P, D_person)
         """
         B, P, D = z_person.shape
-        h = self.phi(z_person.view(B*P, D)).view(B, P, -1)  # (B,P,d_phi)
-        s = h.mean(dim=1)                                   # (B,d_phi)
-        z_grp = self.trunk(s)                               # (B,D_person)
+        z_person = self.norm(z_person.view(B*P, D))
+        h = self.phi(z_person).view(B, P, -1)  # (B,P,d_phi)
+        s = h.mean(dim=1)                      # (B,d_phi)
+        z_grp = self.trunk(s)                  # (B,D_person)
         return z_grp
 
 
@@ -242,6 +285,7 @@ class ClassificationHead(nn.Module):
                     num_classes=num_classes,
                     use_prototypes=use_prototypes,
                     proto_momentum=proto_momentum,
+                    fuse_init=FUSION_WEIGHT_DEFAULTS[name],
                     warmup_epochs=warmup_epochs
                 )
                 for name in self.heads
@@ -256,7 +300,7 @@ class ClassificationHead(nn.Module):
 
     @torch.no_grad()
     def update_prototypes(self, z_dict: Dict[str, torch.Tensor], y_dict: Dict[str, torch.Tensor]):
-        if self.classifier_type != "cosine":
+        if (not self.training) or self.classifier_type != "cosine":
             return
         for name in self.heads:
             z = z_dict[name]

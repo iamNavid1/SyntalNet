@@ -108,7 +108,7 @@ class _MaskedTemporalLSTM(nn.Module):
 
 
 class _SimpleClassifier(nn.Module):
-    """Lightweight MLP classifier tailored for the vanilla LSTM baseline."""
+    """Lightweight MLP classifier tailored for the LSTM baseline."""
 
     def __init__(
         self,
@@ -158,12 +158,12 @@ class _SimpleClassifier(nn.Module):
         return {"shared": shared, "per_head": per_head}, logits
 
     @torch.no_grad()
-    def update_prototypes(self, *_args, **_kwargs) -> None:  # pragma: no cover - intentional no-op
+    def update_prototypes(self, *_args, **_kwargs) -> None:  # pragma: no cover - no-op for the LSTM baseline
         return None
 
 
-class VanillaLSTM(BaseModel):
-    """Baseline multimodal model with simple LSTM encoders."""
+class TemporalBiLSTM(BaseModel):
+    """Baseline multimodal model with bidirectional LSTM encoders."""
 
     def __init__(
         self,

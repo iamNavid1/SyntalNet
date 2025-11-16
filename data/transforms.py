@@ -1,7 +1,8 @@
 import numpy as np
 import pandas as pd
 import torch
-from typing import List, Dict, Any
+from typing import List, Dict, Optional, Tuple, Any
+
 
 def resample_features(
     features_df: pd.DataFrame,
@@ -10,60 +11,59 @@ def resample_features(
     resample_freq: int,
     gap_threshold: float = 0.75,
     return_mask: bool = False,
-) -> torch.Tensor:
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """
-    Resample multivariate time-series features to a uniform time base.
-
-    :param features_df (pd.DataFrame): Input data with a 'timestamp' column and N feature columns.
-    :param start_time (float): Start of the target time window.
-    :param end_time (float): End of the target time window.
-    :param resample_freq (int): Number of samples per second.
-    :param gap_threshold (float): Max time delta allowed for interpolation continuity (in seconds).
-    :param return_mask (bool): If True, also return a binary mask indicating invalid interpolations.
-    :return torch.Tensor: Resampled tensor of shape (num_samples, num_features).
-    :return Optional[torch.Tensor]: Binary mask of shape (num_samples,) where True = invalid interpolation.
+    Resample multivariate time-series features to a uniform grid.
+    - Interpolates each column independently over target_time.
+    - Builds a continuity mask by chunking gaps > gap_threshold.
+    Returns:
+      features: (L, F) float32
+      mask:     (L, 1) float32 (1.0 valid), if return_mask
     """
-    if features_df.empty or 'timestamp' not in features_df.columns:
-        num_samples = int((end_time - start_time) * resample_freq)
-        num_features = len([col for col in features_df.columns if col != 'timestamp'])
-        empty_tensor = torch.zeros((num_samples, num_features), dtype=torch.float)
-        if return_mask:
-            return empty_tensor, torch.zeros_like(empty_tensor, dtype=torch.float)
-        return empty_tensor
-
-    # prepare features_df
-    features_df = features_df.copy()
-    features_df['timestamp'] = pd.to_numeric(features_df['timestamp'], errors='coerce')
-    features_df = features_df.sort_values('timestamp').dropna(subset=['timestamp'])
-
+    # Compute grid
     num_samples = int((end_time - start_time) * resample_freq)
     target_time = np.arange(start_time, end_time, 1.0 / resample_freq)
+    if target_time.shape[0] != num_samples:
+        # guard against floating point drift
+        target_time = np.linspace(start_time, end_time, num_samples, endpoint=False)
 
-    # identify chunks separated by large gaps
-    features_df['dt'] = features_df['timestamp'].diff().fillna(0)
-    features_df['chunk'] = (features_df['dt'] > gap_threshold).cumsum()
+    # Handle degenerate input quickly
+    if features_df is None or features_df.empty or 'timestamp' not in features_df.columns:
+        num_features = len([col for col in features_df.columns if col != 'timestamp'])
+        empty = torch.zeros((num_samples, num_features), dtype=torch.float32)
+        if return_mask:
+            return empty, torch.zeros((num_samples, 1), dtype=torch.float32)
+        return empty
 
-    # build mask for valid interpolated points
+    # Clean/sort timestamps
+    df = features_df.copy()
+    df['timestamp'] = pd.to_numeric(df['timestamp'], errors='coerce')
+    df = df.sort_values('timestamp').dropna(subset=['timestamp'])
+
+    # Identify continuity chunks based on gaps
+    df['dt'] = df['timestamp'].diff().fillna(0)
+    df['chunk'] = (df['dt'] > gap_threshold).cumsum()
+
+    feature_cols = [c for c in df.columns if c not in {'timestamp', 'dt', 'chunk'}]
+
+    # Build continuity mask on the grid using forward/backward chunk ids
     grid_df = pd.DataFrame({'timestamp': target_time})
-    left = pd.merge_asof(grid_df, features_df[['timestamp', 'chunk']], on='timestamp', direction='backward')
-    right = pd.merge_asof(grid_df, features_df[['timestamp', 'chunk']], on='timestamp', direction='forward')
-    mask = (left['chunk'] == right['chunk']).values
+    left = pd.merge_asof(grid_df, df[['timestamp', 'chunk']], on='timestamp', direction='backward')
+    right = pd.merge_asof(grid_df, df[['timestamp', 'chunk']], on='timestamp', direction='forward')
+    cont_mask = (left['chunk'].values == right['chunk'].values)
 
-    # interpolate over the uniform grid
-    feature_cols = [col for col in features_df.columns if col not in {'timestamp', 'dt', 'chunk'}]
+    # Interpolate each feature over the grid
     resampled = []
-    
     for col in feature_cols:
-        col_values = pd.to_numeric(features_df[col], errors='coerce')
+        col_values = pd.to_numeric(df[col], errors='coerce')
         interp_values = np.interp(
             target_time,
-            features_df['timestamp'],
-            col_values,
+            df['timestamp'].values,
+            col_values.values,
             left=np.nan,
             right=np.nan,
         )
-
-        # handle NaNs (forward/backward fill if partially missing, else zero)
+        # If all NaN, set zeros; else ffill/bfill within the target grid
         if np.isnan(interp_values).all():
             interp_values[:] = 0.0
         else:
@@ -75,18 +75,22 @@ def resample_features(
                     target_time[valid_idx],
                     interp_values[valid_idx],
                 )
-
-        # mask out invalid interpolations
-        interp_values[~mask] = 0.0
+        # Zero-out invalid interpolations across gaps
+        interp_values[~cont_mask] = 0.0
         resampled.append(interp_values)
 
-    stacked = np.stack(resampled, axis=1) if resampled else np.zeros((num_samples, 0))
-    stacked_tensor = torch.tensor(stacked, dtype=torch.float)
+    if resampled:
+        stacked = np.stack(resampled, axis=1)  # (L, F)
+    else:
+        stacked = np.zeros((num_samples, 0), dtype=np.float32)
+
+    feats = torch.tensor(stacked, dtype=torch.float32)
 
     if return_mask:
-        mask_2d = np.tile(mask[:, None], (1, stacked.shape[1])).astype(float)  # shape: (num_samples, num_features)
-        return stacked_tensor, torch.tensor(mask_2d, dtype=torch.float)
-    return stacked_tensor
+        # Return time mask as (L,1) float32
+        mask_1d = torch.from_numpy(cont_mask.astype(np.float32)).unsqueeze(1)  # (L,1)
+        return feats, mask_1d
+    return feats
 
 
 STANDARDIZATION_GROUPS: Dict[str, Dict[str, List[int]]] = {

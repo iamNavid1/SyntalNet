@@ -12,9 +12,11 @@ from engine.utils import modalities_to_branches
 
 
 class Validator:
-    def __init__(self, device: torch.device, autocast_kwargs: dict):
+    def __init__(self, device: torch.device, autocast_kwargs: dict, grp_as_ind: bool = False):
         self.device = device
         self.autocast_kwargs = autocast_kwargs
+        self.metrics_device = torch.device('cpu')
+        self.grp_as_ind = grp_as_ind
 
     # ----------------------------- Public API -----------------------------
 
@@ -51,9 +53,14 @@ class Validator:
             with autocast(**self.autocast_kwargs):
                 _, logits = model(batch_data)
                 if loss_fn is not None:
-                    ind_label, grp_label = self._prepare_label_views(batch_labels)
+                    ind_label, grp_label = self._prepare_label_views(batch_labels, self.grp_as_ind)
+                    batch_labels["individual"] = ind_label
+                    batch_labels["group"] = grp_label
                     loss = loss_fn(logits, ind_label, grp_label)
-                    batch_size = batch_labels.get("group", batch_labels.get("individual")).shape[0]
+                    if self.grp_as_ind:
+                        batch_size = batch_labels.get("individual").shape[0]
+                    else:
+                        batch_size = batch_labels.get("group", batch_labels.get("individual")).shape[0]
                     total_loss += float(loss.item()) * batch_size
                     count += batch_size
 
@@ -123,7 +130,7 @@ class Validator:
             for name, clf in model.individual_classifier.classifiers.items():
                 metrics = build_classification_metrics(num_classes)
                 for m in metrics.values():
-                    m.to(self.device)
+                    m.to(self.metrics_device)
                 metric_sets["individual"][name] = metrics
 
         if getattr(model, "group_classifier", None) is not None:
@@ -132,19 +139,33 @@ class Validator:
             for name, clf in model.group_classifier.classifiers.items():
                 metrics = build_classification_metrics(num_classes)
                 for m in metrics.values():
-                    m.to(self.device)
+                    m.to(self.metrics_device)
                 metric_sets["group"][name] = metrics
 
         return metric_sets
 
-    def _prepare_label_views(self, labels: Dict[str, torch.Tensor]):
+    def _prepare_label_views(
+        self, 
+        labels: Dict[str, torch.Tensor],
+        groups_as_individuals: bool = False
+    ):
         ind_label = None
         grp_label = None
+
         if "individual" in labels:
             B, P, L = labels["individual"].shape
             ind_label = labels["individual"].view(B * P, L)
+        else:
+            B = P = L = None
+
         if "group" in labels:
-            grp_label = labels["group"]
+            if groups_as_individuals:
+                grp_label_expanded = labels["group"].repeat_interleave(P, dim=0)
+                ind_label = torch.cat([ind_label, grp_label_expanded], dim=-1) \
+                    if ind_label is not None else grp_label_expanded
+            else:
+                grp_label = labels["group"]
+
         return ind_label, grp_label
 
     # --------------------------- Update paths ---------------------------
@@ -177,16 +198,18 @@ class Validator:
             lbl = labels_tensor.view(B * P, L)
         else:  # group shape (B, L)
             lbl = labels_tensor
+        lbl = lbl.to(self.metrics_device)
         prob_metrics = {"auroc_macro", "auprc_macro", "auprc_per_class", "ece"}
         for idx, (name, lg) in enumerate(logits_split.items()):
-            y = lbl[:, idx]
-            probs = torch.softmax(lg, dim=-1)
+            lg_cpu = lg.detach().to(self.metrics_device)
+            y = lbl[:, idx].detach().to(self.metrics_device)
+            probs = torch.softmax(lg_cpu, dim=-1)
             metrics = metric_sets_split[name]
             for mname, m in metrics.items():
                 if mname in prob_metrics:
                     m.update(probs, y)
                 else:
-                    m.update(lg, y)
+                    m.update(lg_cpu, y)
 
     # --------------------------- Results computation ---------------------------
 

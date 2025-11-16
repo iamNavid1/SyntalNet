@@ -1,5 +1,5 @@
 model:
-  name: VanillaLSTM
+  name: TemporalBiLSTM
   args:
     hidden_size: 128
     num_lstm_layers: 2
@@ -12,11 +12,9 @@ dataset:
   args:
     root_dir: "./dataset"
     modalities: ["face", "pose", "video", "turns", "utterance", "sentiment", "prosody", "audio"]
-    label_type: "kernel"
   split:
-    mode: "item"
-    ratio: 0.2
-    groups: []
+    mode: "kfold"  # "kfold", "logo", "item", "group"
+    n_folds: 5
     seed: 17
   stats_dir: "./configs/normalization_stats.yaml"
   cls_count_dir: "./configs/class_counts.yaml"
@@ -24,28 +22,29 @@ dataset:
 training:
   seed: 42
   num_workers: 4
-  epochs: 120
+  prefetch_factor: 2
+  epochs: 100
   batch_size: 12
   val_batch_size: 12
   learning_rate: 3.e-4
   min_lr: 1.e-5
-  warmup_ratio: 0.06
-  weight_decay: 0.001
+  warmup_ratio: 0.1
+  weight_decay: 0.002
   scheduler: "cosine_decay"
-  grad_clip: 5.
+  grad_clip: 1.
   accum_steps: 4
-  log_interval: 50
-  track_fusion_aux: False
-  track_classifier_aux: False
+  log_interval: 37
+  track_fusion_aux: True
+  track_classifier_aux: True
   loss_type: "multiclass"
   amp: False
   cb_beta: 0.9995
-  focal_gamma: 3.
+  focal_gamma: 2.
   la_tau: 0.
-  label_smoothing: 0.02
-  val_interval: 4
+  label_smoothing: 0.01
+  val_interval: 1
   ckpt_interval: 10
 
 logging:
-  log_dir: ./logs/vanilla_lstm
-  checkpoint_dir: ./checkpoints/vanilla_lstm
+  log_dir: ./logs/lstm
+  checkpoint_dir: ./checkpoints/lstm

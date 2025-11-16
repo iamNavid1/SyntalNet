@@ -103,7 +103,7 @@ class _MaskedTemporalCNN(nn.Module):
 
 
 class _SimpleClassifier(nn.Module):
-    """Lightweight MLP classifier used by the vanilla baselines."""
+    """Lightweight MLP classifier used by the baselines."""
 
     def __init__(
         self,
@@ -153,12 +153,12 @@ class _SimpleClassifier(nn.Module):
         return {"shared": shared, "per_head": per_head}, logits
 
     @torch.no_grad()
-    def update_prototypes(self, *_args, **_kwargs) -> None:  # pragma: no cover - no-op for vanilla baselines
+    def update_prototypes(self, *_args, **_kwargs) -> None:  # pragma: no cover - no-op for the CNN baseline
         return None
 
 
-class VanillaCNN(BaseModel):
-    """Baseline multimodal model with simple temporal CNN encoders."""
+class TemporalCNN(BaseModel):
+    """Baseline multimodal model with temporal CNN encoders."""
 
     def __init__(
         self,

@@ -21,7 +21,7 @@ from data.dataset import GroupDynamicsDataset
 from data.collate import collate_fn
 from data.transforms import StandardizeTransform
 from engine.trainer import Trainer
-from models.builder import build_model, load_config
+from models.builders import build_model, load_config
 from utils.logger import setup_logger
 from utils.scheduler import build_scheduler
 from utils.optimizer import build_optimizer
@@ -35,7 +35,6 @@ def parse_args():
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config file")
     parser.add_argument("--resume", action="store_true", help="Resume from checkpoint")
     parser.add_argument("--resume-path", type=str, default=None, help="Specific checkpoint path to resume")
-    parser.add_argument("--logo", action="store_true", help="Leave-One-Group-Out cross validation (flag only; wire up in your Trainer)")
     return parser.parse_args()
 
 # ----------------------------- distributed utils -----------------------------
@@ -109,6 +108,10 @@ def _worker_init_fn(worker_id: int):
 def find_latest_checkpoint(ckpt_dir: str) -> Optional[str]:
     pattern = os.path.join(ckpt_dir, "epoch_*.pth")
     ckpts = sorted(glob.glob(pattern))
+    def _epoch_num(p):
+        m = re.search(r"epoch_(\d+)\.pth$", os.path.basename(p))
+        return int(m.group(1)) if m else -1
+    ckpts.sort(key=_epoch_num)
     return ckpts[-1] if ckpts else None
 
 def discover_group_ids(root_dir: str, modalities: List[str]) -> List[int]:
@@ -126,7 +129,32 @@ def discover_group_ids(root_dir: str, modalities: List[str]) -> List[int]:
 
 # ----------------------------- Builders -----------------------------
 
-def build_datasets(cfg, logo_held_out=None):
+def _create_kfold_splits(dataset, n_folds: int, fold_idx: int, seed: int):
+    """Create train/val splits for a specific fold in K-fold CV."""
+    n = len(dataset)
+    
+    # Shuffle indices
+    rng = random.Random(seed)
+    all_indices = list(range(n))
+    rng.shuffle(all_indices)
+    
+    # Calculate fold boundaries
+    fold_size = n // n_folds
+    remainder = n % n_folds
+    start_idx = fold_idx * fold_size + min(fold_idx, remainder)
+    end_idx = start_idx + fold_size + (1 if fold_idx < remainder else 0)
+    
+    # Split indices
+    val_indices = all_indices[start_idx:end_idx]
+    train_indices = all_indices[:start_idx] + all_indices[end_idx:]
+    
+    # Create subsets
+    train_subset = Subset(dataset, train_indices)
+    val_subset = Subset(dataset, val_indices)
+    
+    return train_subset, val_subset
+
+def build_datasets(cfg, logo_held_out=None, kfold_fold_idx=None):
     args = cfg["dataset"]["args"]
     train_cfg = {**args}
     val_cfg   = {**args}
@@ -145,6 +173,13 @@ def build_datasets(cfg, logo_held_out=None):
         train_cfg["exclude_groups"] = [logo_held_out]
         val_cfg["include_groups"] = [logo_held_out]
         return GroupDynamicsDataset(**train_cfg), GroupDynamicsDataset(**val_cfg)
+    
+    if kfold_fold_idx is not None:
+        split_cfg = cfg["dataset"].get("split")
+        n_folds = int(split_cfg.get("n_folds", 5))
+        split_seed = int(split_cfg.get("seed", cfg["training"].get("seed", 42)))
+        full = GroupDynamicsDataset(**args)
+        return _create_kfold_splits(full, n_folds, kfold_fold_idx, split_seed)
     
     split_cfg = cfg["dataset"].get("split")
     mode = split_cfg.get("mode", "item")
@@ -201,7 +236,7 @@ def build_loaders(cfg, train_dataset, val_dataset, distributed: bool):
         batch_size         = cfg["training"].get("val_batch_size", cfg["training"]["batch_size"]),
         sampler            = val_sampler,
         shuffle            = False,
-        num_workers        = num_workers,
+        num_workers        = num_workers//2,
         prefetch_factor    = prefetch_factor,
         pin_memory         = True,
         pin_memory_device  = pin_memory_device,
@@ -219,7 +254,6 @@ def run_training(cfg, args, device, local_rank, distributed, logger, writer):
     train_loader, val_loader = build_loaders(cfg, train_dataset, val_dataset, distributed)
 
     model = build_model(cfg).to(device)
-    print("Model architecture:\n", model)
 
     if is_main_process() and logger:
         log_training_hyperparams(cfg, logger)
@@ -243,7 +277,7 @@ def run_training(cfg, args, device, local_rank, distributed, logger, writer):
         "warmup_steps" : int(cfg["training"].get("warmup_ratio", 0) * total_steps),
         "max_steps"    : total_steps,
         "min_lr"       : cfg["training"].get("min_lr", 0.0),
-        "type"         : cfg["training"].get("scheduler", "warmup_cosine"),
+        "type"         : cfg["training"].get("scheduler", "cosine_decay"),
     }
     scheduler = build_scheduler(optimizer, scheduler_cfg)
 
@@ -276,7 +310,7 @@ def run_training(cfg, args, device, local_rank, distributed, logger, writer):
         checkpoint_interval=cfg["training"].get("checkpoint_interval", 1),
     )
 
-# ----------------------------- LOGO helpers -----------------------------
+# ----------------------------- Cross Validation helpers -----------------------------
 
 def fold_dirs(base_log_dir: str, base_ckpt_dir: str, held_out_group: int) -> Tuple[str, str]:
     tag = f"fold_{held_out_group:02d}"
@@ -322,6 +356,37 @@ def find_resume_state_for_logo(base_ckpt_dir: str, all_groups: List[int], explic
 
     return len(all_groups), None  # all done
 
+def kfold_fold_dirs(base_log_dir: str, base_ckpt_dir: str, fold_idx: int) -> Tuple[str, str]:
+    tag = f"fold_{fold_idx:02d}"
+    return (os.path.join(base_log_dir,  "kfold", tag),
+            os.path.join(base_ckpt_dir, "kfold", tag))
+
+def parse_fold_idx_from_path(path: str) -> Optional[int]:
+    parts = Path(path).parts
+    for p in parts:
+        m = re.match(r"fold_(\d+)", p)
+        if m:
+            return int(m.group(1))
+    return None
+
+def find_resume_state_for_kfold(base_ckpt_dir: str, n_folds: int, explicit_path: Optional[str]) -> Tuple[int, Optional[str]]:
+    if explicit_path is not None:
+        fold_idx = parse_fold_idx_from_path(explicit_path)
+        if fold_idx is None:
+            raise ValueError(f"--resume-path does not include a fold_XX segment: {explicit_path}")
+        if fold_idx < 0 or fold_idx >= n_folds:
+            raise ValueError(f"Fold index {fold_idx} (from resume path) is out of range [0, {n_folds})")
+        return fold_idx, explicit_path
+
+    for i in range(n_folds):
+        _, cdir = kfold_fold_dirs("", base_ckpt_dir, i)
+        if fold_is_done(cdir):
+            continue
+        latest = find_latest_checkpoint(cdir)
+        return i, latest
+
+    return n_folds, None  # all done
+
 # ----------------------------- LOGO CV -----------------------------
 
 def run_logo_cv(cfg, args, device, local_rank, distributed, base_logger, base_writer):
@@ -354,7 +419,10 @@ def run_logo_cv(cfg, args, device, local_rank, distributed, base_logger, base_wr
         if distributed:
             dist.barrier()
 
-        fold_logger, fold_writer = (setup_logger(log_dir) if is_main_process() else (None, None))
+        fold_logger, fold_writer = (
+            setup_logger(log_dir, name=f"logo_fold_{held_out:02d}")
+            if is_main_process() else (None, None)
+            )
         if is_main_process() and fold_logger:
             fold_logger.info(f"====== LOGO fold {i+1}/{len(all_groups)}: held-out group {held_out} ======")
         # re-seed per fold
@@ -365,7 +433,6 @@ def run_logo_cv(cfg, args, device, local_rank, distributed, base_logger, base_wr
         train_loader, val_loader = build_loaders(cfg, train_dataset, val_dataset, distributed)
 
         model = build_model(cfg).to(device)
-        print("Model architecture:\n", model)
 
         if is_main_process() and fold_logger:
             log_training_hyperparams(cfg, fold_logger)
@@ -389,7 +456,7 @@ def run_logo_cv(cfg, args, device, local_rank, distributed, base_logger, base_wr
             "warmup_steps" : int(cfg["training"].get("warmup_ratio", 0) * total_steps),
             "max_steps"    : total_steps,
             "min_lr"       : cfg["training"].get("min_lr", 0.0),
-            "type"         : cfg["training"].get("scheduler", ""),
+            "type"         : cfg["training"].get("scheduler", "cosine_decay"),
         }
         scheduler = build_scheduler(optimizer, scheduler_cfg)
 
@@ -430,6 +497,114 @@ def run_logo_cv(cfg, args, device, local_rank, distributed, base_logger, base_wr
         if distributed:
             dist.barrier()
 
+# ----------------------------- K-fold CV -----------------------------
+
+def run_kfold_cv(cfg, args, device, local_rank, distributed, base_logger, base_writer):
+    split_cfg = cfg["dataset"].get("split")
+    n_folds = int(split_cfg.get("n_folds", 5))
+
+    if is_main_process() and base_logger:
+        base_logger.info(f"K-fold CV with {n_folds} folds")
+
+    base_log_dir  = cfg["logging"]["log_dir"]
+    base_ckpt_dir = cfg["logging"]["checkpoint_dir"]
+
+    start_idx = 0
+    resume_ckpt_for_first_fold: Optional[str] = None
+    if args.resume:
+        start_idx, resume_ckpt_for_first_fold = find_resume_state_for_kfold(base_ckpt_dir, n_folds, args.resume_path)
+        if start_idx >= n_folds:
+            if is_main_process() and base_logger:
+                base_logger.info("All K-fold folds already completed. Nothing to do.")
+            return
+
+    for i in range(start_idx, n_folds):
+        log_dir, ckpt_dir = kfold_fold_dirs(base_log_dir, base_ckpt_dir, i)
+
+        if is_main_process():
+            os.makedirs(log_dir, exist_ok=True)
+            os.makedirs(ckpt_dir, exist_ok=True)
+        if distributed:
+            dist.barrier()
+
+        fold_logger, fold_writer = (
+            setup_logger(log_dir, name=f"kfold_fold_{i:02d}")
+            if is_main_process() else (None, None)
+            )
+        if is_main_process() and fold_logger:
+            fold_logger.info(f"====== K-fold fold {i+1}/{n_folds} ======")
+        # re-seed per fold
+        base_seed = cfg["training"].get("seed", 42)
+        set_seed(base_seed + i, add_rank=True)
+
+        train_dataset, val_dataset = build_datasets(cfg, kfold_fold_idx=i)
+        train_loader, val_loader = build_loaders(cfg, train_dataset, val_dataset, distributed)
+
+        model = build_model(cfg).to(device)
+
+        if is_main_process() and fold_logger:
+            log_training_hyperparams(cfg, fold_logger)
+            log_model_hyperparams(cfg, fold_logger)
+            log_param_counts(model, fold_logger)
+
+        if distributed:
+            if device.type != "cuda":
+                raise RuntimeError("CPU distributed not supported; use CUDA or run single-process.")
+            model = torch.nn.parallel.DistributedDataParallel(
+                model,
+                device_ids=[local_rank],
+                output_device=local_rank,
+            )
+
+        optimizer = build_optimizer(model, cfg)
+
+        accum = max(1, cfg["training"].get("accum_steps", 1))
+        total_steps = math.ceil(len(train_loader) / accum) * cfg["training"]["epochs"]
+        scheduler_cfg = {
+            "warmup_steps" : int(cfg["training"].get("warmup_ratio", 0) * total_steps),
+            "max_steps"    : total_steps,
+            "min_lr"       : cfg["training"].get("min_lr", 0.0),
+            "type"         : cfg["training"].get("scheduler", "cosine_decay"),
+        }
+        scheduler = build_scheduler(optimizer, scheduler_cfg)
+
+        trainer = Trainer(
+            cfg          = cfg,
+            model        = model,
+            train_loader = train_loader,
+            val_loader   = val_loader,
+            optimizer    = optimizer,
+            scheduler    = scheduler,
+            device       = device,
+            logger       = fold_logger,
+            writer       = fold_writer,
+            world_size   = get_world_size(),
+        )
+
+        if args.resume:
+            if i == start_idx and resume_ckpt_for_first_fold is not None:
+                resume_path = resume_ckpt_for_first_fold
+            else:
+                resume_path = find_latest_checkpoint(ckpt_dir)
+            if resume_path is not None:
+                trainer.resume_from(resume_path)
+            else:
+                if is_main_process() and fold_logger:
+                    fold_logger.info("No checkpoint found for this fold — starting fresh")
+
+        # train this fold
+        trainer.train(
+            epochs=cfg["training"]["epochs"],
+            ckpt_dir=ckpt_dir,
+            validate_interval=cfg["training"].get("val_interval", 1),
+            checkpoint_interval=cfg["training"].get("checkpoint_interval", 1),
+        )
+
+        mark_fold_done(ckpt_dir, {"fold_index": i})
+
+        if distributed:
+            dist.barrier()
+
 # ----------------------------- Main -----------------------------
 
 def main():
@@ -447,13 +622,18 @@ def main():
     if distributed:
         dist.barrier()
 
-    logger, writer = (setup_logger(log_dir) if is_main_process() else (None, None))
+    logger, writer = (setup_logger(log_dir, name="base") if is_main_process() else (None, None))
 
     set_seed(cfg["training"].get("seed", 42), add_rank=True)
 
     try:
-        if args.logo:
+        split_cfg = cfg["dataset"].get("split", {})
+        split_mode = split_cfg.get("mode", "item")
+        
+        if split_mode == "logo":
             run_logo_cv(cfg, args, device, local_rank, distributed, logger, writer)
+        elif split_mode == "kfold":
+            run_kfold_cv(cfg, args, device, local_rank, distributed, logger, writer)
         else:
             run_training(cfg, args, device, local_rank, distributed, logger, writer)
     finally:

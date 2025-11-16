@@ -127,7 +127,7 @@ def log_param_counts_detailed(
         for child_name, child_mod in kids_sorted:
             add_node(node_here, child_mod, f"{path}.{child_name}" if path else child_name, depth + 1)
 
-    # Prefer grouping by major blocks, but skip ones that are None.
+    # Prefer grouping by major blocks, skip ones that are None.
     major_added = False
     for major_name in ("branches", "mm_fusion", "individual_classifier", "group_classifier"):
         major = getattr(root_mod, major_name, None)
@@ -136,13 +136,9 @@ def log_param_counts_detailed(
         if isinstance(major, nn.Module):
             n = mod_params(major)
             if n >= min_params and _should_include(major_name, include_re, exclude_re):
-                subroot = tree.add(_fmt_label(
-                    major_name + (f" : {major.__class__.__name__}" if show_type else ""), n))
-                add_node(subroot, major, major_name, depth=1)
+                add_node(tree, major, major_name, depth=1)
                 major_added = True
         elif isinstance(major, (nn.ModuleDict, nn.Sequential, nn.ModuleList)):
-            # These are Modules too (subclass), so above branch covers them; this
-            # block is here only if you ever pass non-Module containers.
             pass
 
     if not major_added:
