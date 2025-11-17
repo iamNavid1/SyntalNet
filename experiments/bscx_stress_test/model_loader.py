@@ -17,7 +17,7 @@ project_root = Path(__file__).resolve().parent.parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from models.builders import build_model, load_config
+from models import builders as build
 from models.SyntalNet import SyntalNet
 
 
@@ -43,14 +43,14 @@ def load_model_with_fusion_type(
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # Load config
-    cfg = load_config(config_path)
+    cfg = build.config(config_path)
     
     # Override fusion type if specified
     if fusion_type is not None:
         cfg["model"]["args"]["mc_fusion_type"] = fusion_type
     
     # Build model
-    model = build_model(cfg)
+    model = build.model(cfg)
     
     # Load checkpoint if provided
     if checkpoint_path is not None:

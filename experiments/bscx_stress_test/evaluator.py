@@ -20,7 +20,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from engine.utils import modalities_to_branches, BuildAutocastKWargs
-from experiments.stress_test.model_wrapper import CorruptedSyntalNet, create_corruption_fn
+from experiments.bscx_stress_test.model_wrapper import CorruptedSyntalNet, create_corruption_fn
 from utils.metrics import build_classification_metrics, compute_metrics
 
 

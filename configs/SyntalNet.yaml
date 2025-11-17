@@ -20,7 +20,7 @@ dataset:
 training:
   seed: 42
   num_workers: 4
-  prefetch_factor: 2
+  prefetch_factor: 4
   epochs: 100
   batch_size: 12
   val_batch_size: 12
@@ -40,7 +40,7 @@ training:
   focal_gamma: 2.
   la_tau: 0.
   label_smoothing: 0.01
-  val_interval: 1
+  val_interval: 10
   ckpt_interval: 10
 
 logging:

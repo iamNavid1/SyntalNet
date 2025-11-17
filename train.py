@@ -17,11 +17,11 @@ import torch.distributed as dist
 from torch.utils.data import random_split, Subset
 from torch.utils.data import DataLoader, DistributedSampler
 
+import models.builders as build
 from data.dataset import GroupDynamicsDataset
 from data.collate import collate_fn
 from data.transforms import StandardizeTransform
 from engine.trainer import Trainer
-from models.builders import build_model, load_config
 from utils.logger import setup_logger
 from utils.scheduler import build_scheduler
 from utils.optimizer import build_optimizer
@@ -253,7 +253,7 @@ def run_training(cfg, args, device, local_rank, distributed, logger, writer):
     train_dataset, val_dataset = build_datasets(cfg)
     train_loader, val_loader = build_loaders(cfg, train_dataset, val_dataset, distributed)
 
-    model = build_model(cfg).to(device)
+    model = build.model(cfg).to(device)
 
     if is_main_process() and logger:
         log_training_hyperparams(cfg, logger)
@@ -307,7 +307,7 @@ def run_training(cfg, args, device, local_rank, distributed, logger, writer):
         epochs=cfg["training"]["epochs"],
         ckpt_dir=ckpt_dir,
         validate_interval=cfg["training"].get("val_interval", 1),
-        checkpoint_interval=cfg["training"].get("checkpoint_interval", 1),
+        checkpoint_interval=cfg["training"].get("ckpt_interval", 1),
     )
 
 # ----------------------------- Cross Validation helpers -----------------------------
@@ -432,7 +432,7 @@ def run_logo_cv(cfg, args, device, local_rank, distributed, base_logger, base_wr
         train_dataset, val_dataset = build_datasets(cfg, logo_held_out=held_out)
         train_loader, val_loader = build_loaders(cfg, train_dataset, val_dataset, distributed)
 
-        model = build_model(cfg).to(device)
+        model = build.model(cfg).to(device)
 
         if is_main_process() and fold_logger:
             log_training_hyperparams(cfg, fold_logger)
@@ -489,7 +489,7 @@ def run_logo_cv(cfg, args, device, local_rank, distributed, base_logger, base_wr
             epochs=cfg["training"]["epochs"],
             ckpt_dir=ckpt_dir,
             validate_interval=cfg["training"].get("val_interval", 1),
-            checkpoint_interval=cfg["training"].get("checkpoint_interval", 1),
+            checkpoint_interval=cfg["training"].get("ckpt_interval", 1),
         )
 
         mark_fold_done(ckpt_dir, {"held_out_group": held_out, "fold_index": i})
@@ -540,7 +540,7 @@ def run_kfold_cv(cfg, args, device, local_rank, distributed, base_logger, base_w
         train_dataset, val_dataset = build_datasets(cfg, kfold_fold_idx=i)
         train_loader, val_loader = build_loaders(cfg, train_dataset, val_dataset, distributed)
 
-        model = build_model(cfg).to(device)
+        model = build.model(cfg).to(device)
 
         if is_main_process() and fold_logger:
             log_training_hyperparams(cfg, fold_logger)
@@ -597,7 +597,7 @@ def run_kfold_cv(cfg, args, device, local_rank, distributed, base_logger, base_w
             epochs=cfg["training"]["epochs"],
             ckpt_dir=ckpt_dir,
             validate_interval=cfg["training"].get("val_interval", 1),
-            checkpoint_interval=cfg["training"].get("checkpoint_interval", 1),
+            checkpoint_interval=cfg["training"].get("ckpt_interval", 1),
         )
 
         mark_fold_done(ckpt_dir, {"fold_index": i})
@@ -609,7 +609,7 @@ def run_kfold_cv(cfg, args, device, local_rank, distributed, base_logger, base_w
 
 def main():
     args = parse_args()
-    cfg = load_config(args.config)
+    cfg = build.config(args.config)
 
     distributed, rank, world_size, local_rank, device = init_distributed_mode()
 

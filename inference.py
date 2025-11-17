@@ -17,7 +17,7 @@ from data.dataset import GroupDynamicsDataset
 from data.collate import collate_fn
 from data.transforms import StandardizeTransform
 from engine.utils import BuildAutocastKWargs, modalities_to_branches
-from models.builders import build_model, load_config
+import models.builders as build
 from torch.amp import autocast
 
 
@@ -369,7 +369,7 @@ def save_results_to_csv(results: List[Dict[str, Any]], output_path: str):
 # ----------------------------- Main -----------------------------
 def main():
     args = parse_args()
-    cfg = load_config(args.config)
+    cfg = build.config(args.config)
     
     # Set seed for reproducibility
     seed = int(cfg.get("training", {}).get("seed", 42))
@@ -448,7 +448,7 @@ def main():
     
     # -------------------- Model --------------------
     print("Building Model...")
-    model = build_model(cfg).to(device)
+    model = build.model(cfg).to(device)
     
     state = torch.load(args.checkpoint, map_location="cpu")
     print("Loading Model Checkpoint...")

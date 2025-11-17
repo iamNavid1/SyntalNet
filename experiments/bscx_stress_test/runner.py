@@ -23,10 +23,10 @@ project_root = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from models.builders import load_config
-from experiments.stress_test.model_loader import load_model_with_fusion_type, get_fusion_type_from_variant
-from experiments.stress_test.dataset_builder import build_datasets, build_dataloader
-from experiments.stress_test.evaluator import StressTestEvaluator
-from experiments.stress_test.metrics_collector import MetricsCollector
+from experiments.bscx_stress_test.model_loader import load_model_with_fusion_type, get_fusion_type_from_variant
+from experiments.bscx_stress_test.dataset_builder import build_datasets, build_dataloader
+from experiments.bscx_stress_test.evaluator import StressTestEvaluator
+from experiments.bscx_stress_test.metrics_collector import MetricsCollector
 
 
 # Corruption sweep configurations

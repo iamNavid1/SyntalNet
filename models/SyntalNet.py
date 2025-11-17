@@ -4,14 +4,14 @@ import torch.nn as nn
 from torch.nn.modules.utils import _pair
 from typing import List, Tuple, Dict, Optional, Any, Type
 
+import models.builders as build
 from models.base_model import BaseModel
-from models.fusion import BSC_X, GLR_X, SoSE_X
 from models.utils import ChannelLayerNorm2d
 from models.classifier import ClassificationHead
 from models.encoder import CNXv2Block, StageTransition
 from models.partial import PartialAvgPool2d, PartialGeM
+from models.multiperson_fusion import SoSE_X
 
-from models.builders import build_multichannel_fusion
 
 # -----------------------------------------------------------------------------
 #                                Specifications
@@ -322,7 +322,7 @@ class Branch(nn.Module):
         self.mods_order = list(self.mods)
         Cins = [mod_stage_chs[m][-1] for m in self.mods_order]
         if len(self.mods) > 1:
-            self.mc_fusion = build_multichannel_fusion(
+            self.mc_fusion = build.multichannel_fusion(
                 variant    = mc_fusion_type,
                 Cin_list   = Cins,
                 C          = shared_dim,
@@ -407,6 +407,7 @@ class SyntalNet(BaseModel):
         # in-branch fusion
         mc_fusion_type: str = "bscx",
         # cross-branch fusion
+        mm_fusion_type: str = "glrx",
         rank_pair: int = 12,
         alloc_hidden: int = 24,
         # encoder / stage hyperparams
@@ -477,10 +478,11 @@ class SyntalNet(BaseModel):
         # ----------------------- multimodal fusion -----------------------
         M = len(self.branches)
         if M > 1:
-            self.mm_fusion = GLR_X(
-                num_mod      = M,
-                dims_mod     = shared_dim,
-                rank_pair    = rank_pair,
+            self.mm_fusion = build.multimodal_fusion(
+                variant    = mm_fusion_type,
+                num_mod    = M,
+                dims_mod   = shared_dim,
+                rank_pair  = rank_pair,
                 alloc_hidden = alloc_hidden,
             )
         else:

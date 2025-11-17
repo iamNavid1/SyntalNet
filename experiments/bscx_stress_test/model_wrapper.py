@@ -19,7 +19,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from models.SyntalNet import SyntalNet
-from experiments.stress_test.corruptions import (
+from experiments.bscx_stress_test.corruptions import (
     stream_dropout,
     channel_dropout,
     temporal_band_mask,

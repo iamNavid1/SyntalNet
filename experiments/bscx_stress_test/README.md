@@ -21,7 +21,7 @@ The stress test suite evaluates model variants under various corruption scenario
 ### Basic Usage
 
 ```bash
-python experiments/stress_test/runner.py \
+python experiments/bscx_stress_test/runner.py \
     --config configs/EXPT_main.yaml \
     --checkpoint-dir ./checkpoints \
     --output-dir ./stress_test_results \
@@ -125,7 +125,7 @@ The suite optimizes computation by:
 2. Save checkpoints in the expected directory structure
 3. Run stress test evaluation:
    ```bash
-   python experiments/stress_test/runner.py \
+   python experiments/bscx_stress_test/runner.py \
        --config configs/EXPT_main.yaml \
        --checkpoint-dir ./checkpoints \
        --output-dir ./stress_test_results

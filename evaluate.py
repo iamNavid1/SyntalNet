@@ -19,7 +19,7 @@ from data.collate import collate_fn
 from data.transforms import StandardizeTransform
 from engine.validator import Validator
 from engine.utils import BuildAutocastKWargs
-from models.builders import build_model, load_config
+import models.builders as build
 
 
 # ----------------------------- CLI -----------------------------
@@ -230,7 +230,7 @@ def round_jsonable(obj, ndigits: int = 6):
 # ----------------------------- Main -----------------------------
 def main():
     args = parse_args()
-    cfg = load_config(args.config)
+    cfg = build.config(args.config)
 
     set_seed(int(cfg.get("training", {}).get("seed", 42)))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -261,7 +261,7 @@ def main():
 
     # -------------------- Model --------------------
     print("Building Model...")
-    model = build_model(cfg).to(device)
+    model = build.model(cfg).to(device)
 
     state = torch.load(args.checkpoint, map_location="cpu")
     print("Loading Model Checkpoints...")

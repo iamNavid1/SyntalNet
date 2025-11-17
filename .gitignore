@@ -1,6 +1,7 @@
 # data
 *.csv
 *.txt
+!requirements.txt
 *.npy
 *.pth
 *.json
