@@ -54,9 +54,8 @@ def _create_kfold_splits(dataset, n_folds: int, fold_idx: int, seed: int):
     n = len(dataset)
     
     # Shuffle indices
-    rng = random.Random(seed)
-    all_indices = list(range(n))
-    rng.shuffle(all_indices)
+    g = torch.Generator().manual_seed(seed)
+    all_indices = torch.randperm(n, generator=g).tolist()
     
     # Calculate fold boundaries
     fold_size = n // n_folds
