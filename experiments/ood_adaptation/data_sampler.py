@@ -44,7 +44,7 @@ class StratifiedSampler:
         # Collect all labels for stratification
         all_labels = []
         for i in range(n_total):
-            _, labels = dataset[i]
+            _, _, labels, _ = dataset[i]
             # Get first label dimension for stratification
             if label_key in labels:
                 label = labels[label_key]

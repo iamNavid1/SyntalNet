@@ -195,7 +195,7 @@ def run_data_portion_sweep(
     logger: logging.Logger,
     data_proportions: List[float] = None,
     finetune_epochs: int = 10,
-    finetune_lr_divisor: int = 30,
+    finetune_lr_divisor: int = 3,
     seed: int = 42,
 ) -> OODAdaptationMetricsCollector:
     """
@@ -215,16 +215,16 @@ def run_data_portion_sweep(
         output_dir: Directory to save results
         device: Device to run on
         logger: Logger instance
-        data_proportions: List of proportions to sweep (default: [0, 0.01, 0.02, 0.05, 0.1, 0.15, 0.2])
+        data_proportions: List of proportions to sweep (default: [0, 0.05, 0.10, 0.15, 0.20, 0.25])
         finetune_epochs: Number of epochs for fine-tuning (default: 10)
-        finetune_lr_divisor: Divide base LR by this factor for fine-tuning (default: 30)
+        finetune_lr_divisor: Divide base LR by this factor for fine-tuning (default: 3)
         seed: Random seed for data sampling
     
     Returns:
         Metrics collector with all results
     """
     if data_proportions is None:
-        data_proportions = [0.0, 0.01, 0.02, 0.05, 0.10, 0.15, 0.20]
+        data_proportions = [0.0, 0.05, 0.10, 0.15, 0.20, 0.25]
     
     # Discover all groups
     root_dir = cfg["dataset"]["args"]["root_dir"]
@@ -306,11 +306,24 @@ def run_data_portion_sweep(
                     train_loss=None,
                 )
                 
-                logger.info(f"  Val Loss: {val_loss:.4f}")
+                if val_loss is not None:
+                    logger.info(f"  Val Loss: {val_loss:.4f}")
+                else:
+                    logger.info(f"  Val Loss: None")
+                
+                # Log F1 macro for all labels (zero-shot)
+                if metrics:
+                    for split_name in ["individual", "group"]:
+                        if split_name in metrics:
+                            for head_name, head_metrics in metrics[split_name].items():
+                                if "f1_macro" in head_metrics:
+                                    f1_value = head_metrics["f1_macro"]
+                                    logger.info(f"  {split_name.capitalize()} {head_name} F1 Macro: {f1_value:.4f}")
                 
                 # Cleanup
-                del base_model
-                torch.cuda.empty_cache()
+                del base_model, test_loader
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 
             else:
                 # Fine-tuning with data proportion
@@ -334,7 +347,8 @@ def run_data_portion_sweep(
                 
                 # Create optimizer with reduced LR
                 finetune_cfg = dict(cfg)
-                finetune_cfg["training"]["learning_rate"] = cfg["training"]["learning_rate"] / finetune_lr_divisor
+                finetune_lr = cfg["training"]["learning_rate"] / finetune_lr_divisor
+                finetune_cfg["training"]["learning_rate"] = finetune_lr
                 
                 optimizer = build_optimizer(model, finetune_cfg)
                 
@@ -344,7 +358,7 @@ def run_data_portion_sweep(
                 scheduler_cfg = {
                     "warmup_steps": int(cfg["training"].get("warmup_ratio", 0) * total_steps),
                     "max_steps": total_steps,
-                    "min_lr": cfg["training"].get("min_lr", 0.0),
+                    "min_lr": finetune_lr,
                     "type": cfg["training"].get("scheduler", "cosine_decay"),
                 }
                 scheduler = build_scheduler(optimizer, scheduler_cfg)
@@ -369,11 +383,26 @@ def run_data_portion_sweep(
                     
                     # Train
                     train_loss = finetuner.train_epoch(epoch)
-                    logger.info(f"    Train Loss: {train_loss:.4f}")
+                    if train_loss is not None:
+                        logger.info(f"    Train Loss: {train_loss:.4f}")
+                    else:
+                        logger.info(f"    Train Loss: None")
                     
                     # Validate
                     metrics, val_loss = finetuner.validate()
-                    logger.info(f"    Val Loss: {val_loss:.4f}")
+                    if val_loss is not None:
+                        logger.info(f"    Val Loss: {val_loss:.4f}")
+                    else:
+                        logger.info(f"    Val Loss: None")
+                    
+                    # Log F1 macro for all labels
+                    if metrics:
+                        for split_name in ["individual", "group"]:
+                            if split_name in metrics:
+                                for head_name, head_metrics in metrics[split_name].items():
+                                    if "f1_macro" in head_metrics:
+                                        f1_value = head_metrics["f1_macro"]
+                                        logger.info(f"    {split_name.capitalize()} {head_name} F1 Macro: {f1_value:.4f}")
                     
                     # Store results
                     collector.add_result(
@@ -385,8 +414,9 @@ def run_data_portion_sweep(
                     )
                 
                 # Cleanup
-                del model, optimizer, scheduler, finetuner
-                torch.cuda.empty_cache()
+                del model, optimizer, scheduler, finetuner, train_loader, val_loader
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
         
         logger.info("")
     
@@ -423,7 +453,7 @@ def run_epoch_sweep(
     fixed_proportion: float = 0.10,
     epochs_to_extract: List[int] = None,
     extra_epochs: List[int] = None,
-    finetune_lr_divisor: int = 30,
+    finetune_lr_divisor: int = 3,
     seed: int = 42,
 ) -> OODAdaptationMetricsCollector:
     """
@@ -545,7 +575,8 @@ def run_epoch_sweep(
             
             # Create optimizer with reduced LR
             finetune_cfg = dict(cfg)
-            finetune_cfg["training"]["learning_rate"] = cfg["training"]["learning_rate"] / finetune_lr_divisor
+            finetune_lr = cfg["training"]["learning_rate"] / finetune_lr_divisor
+            finetune_cfg["training"]["learning_rate"] = finetune_lr
             
             optimizer = build_optimizer(model, finetune_cfg)
             
@@ -558,7 +589,7 @@ def run_epoch_sweep(
             scheduler_cfg = {
                 "warmup_steps": int(cfg["training"].get("warmup_ratio", 0) * total_steps),
                 "max_steps": total_steps,
-                "min_lr": cfg["training"].get("min_lr", 0.0),
+                "min_lr": finetune_lr,
                 "type": cfg["training"].get("scheduler", "cosine_decay"),
             }
             scheduler = build_scheduler(optimizer, scheduler_cfg)
@@ -585,12 +616,27 @@ def run_epoch_sweep(
                 
                 # Train
                 train_loss = finetuner.train_epoch(epoch)
-                logger.info(f"    Train Loss: {train_loss:.4f}")
+                if train_loss is not None:
+                    logger.info(f"    Train Loss: {train_loss:.4f}")
+                else:
+                    logger.info(f"    Train Loss: None")
                 
                 # Evaluate only at specified epochs
                 if epoch in extra_epochs:
                     metrics, val_loss = finetuner.validate()
-                    logger.info(f"    Val Loss: {val_loss:.4f}")
+                    if val_loss is not None:
+                        logger.info(f"    Val Loss: {val_loss:.4f}")
+                    else:
+                        logger.info(f"    Val Loss: None")
+                    
+                    # Log F1 macro for all labels
+                    if metrics:
+                        for split_name in ["individual", "group"]:
+                            if split_name in metrics:
+                                for head_name, head_metrics in metrics[split_name].items():
+                                    if "f1_macro" in head_metrics:
+                                        f1_value = head_metrics["f1_macro"]
+                                        logger.info(f"    {split_name.capitalize()} {head_name} F1 Macro: {f1_value:.4f}")
                     
                     # Store results
                     collector.add_result(
@@ -602,8 +648,9 @@ def run_epoch_sweep(
                     )
             
             # Cleanup
-            del model, optimizer, scheduler, finetuner
-            torch.cuda.empty_cache()
+            del model, optimizer, scheduler, finetuner, train_loader, val_loader
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         
         logger.info("")
     
@@ -666,7 +713,7 @@ def main():
         "--data-proportions",
         type=float,
         nargs="+",
-        default=[0.0, 0.01, 0.02, 0.05, 0.10, 0.15, 0.20],
+        default=[0.0, 0.05, 0.10, 0.15, 0.20, 0.25],
         help="Data proportions for Experiment 1"
     )
     parser.add_argument(
@@ -698,7 +745,7 @@ def main():
     parser.add_argument(
         "--lr-divisor",
         type=int,
-        default=30,
+        default=3,
         help="Divide base LR by this factor for fine-tuning"
     )
     parser.add_argument(
