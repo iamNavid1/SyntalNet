@@ -5,6 +5,7 @@ import sys
 import time
 import logging
 import gc
+import yaml
 from pathlib import Path
 import torch
 
@@ -81,9 +82,57 @@ def is_baseline(corruption_type: str, param: float | int) -> bool:
     return baseline_conditions.get(corruption_type, False)
 
 
+def get_variant_name_from_config(config_path: str) -> str:
+    """
+    Extract variant name from config file.
+    First tries to extract from filename (e.g., 'EXPT_BSCX_concat-proj.yaml' -> 'concat-proj'),
+    then falls back to mc_fusion_type from config content.
+    """
+    basename = os.path.basename(config_path)
+    name = os.path.splitext(basename)[0]
+    
+    # Try to extract from filename pattern EXPT_BSCX_* or EXPT_*
+    if "EXPT_BSCX_" in name:
+        variant = name.replace("EXPT_BSCX_", "")
+        variant = variant.replace("-", "_")
+        return variant
+    
+    # Fallback: try to get from config content
+    try:
+        with open(config_path, 'r') as f:
+            cfg = yaml.safe_load(f)
+        mc_fusion_type = cfg.get("model", {}).get("args", {}).get("mc_fusion_type", None)
+        if mc_fusion_type:
+            variant_mapping = {
+                "bscx": "bscx",
+                "bscx_proj_only": "proj_only",
+                "concat_proj": "concat_proj",
+                "uniform_avg": "uniform_avg",
+            }
+            return variant_mapping.get(mc_fusion_type, mc_fusion_type)
+    except Exception:
+        pass
+    
+    # Final fallback: use filename without extension
+    return name
+
+
+def get_checkpoint_dir_from_config(config_path: str) -> str:
+    """
+    Extract checkpoint directory from config file.
+    """
+    with open(config_path, 'r') as f:
+        cfg = yaml.safe_load(f)
+    
+    checkpoint_dir = cfg.get("logging", {}).get("checkpoint_dir", None)
+    if checkpoint_dir is None:
+        raise ValueError(f"No checkpoint_dir found in config: {config_path}")
+    
+    return checkpoint_dir
+
+
 def run_stress_test(
-    config_path: str,
-    checkpoint_dir: str,
+    config_paths: List[str],
     output_dir: str,
     variants: Optional[List[str]] = None,
     device: Optional[torch.device] = None,
@@ -92,17 +141,20 @@ def run_stress_test(
     Run complete stress test evaluation.
     
     Args:
-        config_path: Path to base config YAML
-        checkpoint_dir: Directory containing checkpoints for each variant
+        config_paths: List of paths to config YAML files (one per variant)
         output_dir: Directory to save results
-        variants: List of variant names to evaluate (default: all)
+        variants: List of variant names to evaluate (default: all configs)
+                  If provided, filters configs to only those matching the variants
         device: Device to run on (default: auto-detect)
+    
+    Note:
+        The split mode and number of folds are determined by the config file's
+        dataset.split configuration, ensuring consistency with training/evaluation splits.
+        Supported modes: "item", "group", "logo", "kfold"
+        Checkpoint directories are automatically extracted from each config file.
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    if variants is None:
-        variants = MODEL_VARIANTS
     
     # Setup
     os.makedirs(output_dir, exist_ok=True)
@@ -111,15 +163,58 @@ def run_stress_test(
     logger.info("=" * 80)
     logger.info("Starting Stress Test Evaluation")
     logger.info("=" * 80)
-    logger.info(f"Config: {config_path}")
-    logger.info(f"Checkpoint dir: {checkpoint_dir}")
+    logger.info(f"Config files: {config_paths}")
     logger.info(f"Output dir: {output_dir}")
-    logger.info(f"Variants: {variants}")
     logger.info(f"Device: {device}")
     logger.info("")
     
-    # Load config
-    cfg = build.config(config_path)
+    # Process configs: extract variant names and checkpoint directories
+    config_info: List[Tuple[str, str, str]] = []  # (config_path, variant_name, checkpoint_dir)
+    
+    for config_path in config_paths:
+        if not os.path.exists(config_path):
+            logger.warning(f"Config file not found: {config_path}, skipping...")
+            continue
+        
+        try:
+            variant_name = get_variant_name_from_config(config_path)
+            checkpoint_dir = get_checkpoint_dir_from_config(config_path)
+            config_info.append((config_path, variant_name, checkpoint_dir))
+            logger.info(f"  {config_path} -> variant: {variant_name}, checkpoint_dir: {checkpoint_dir}")
+        except Exception as e:
+            logger.error(f"Failed to process config {config_path}: {e}")
+            logger.warning(f"Skipping config: {config_path}")
+            continue
+    
+    if not config_info:
+        logger.error("No valid config files found!")
+        return
+    
+    # Filter by variants if provided
+    if variants is not None:
+        # Normalize variant names for comparison
+        variants_normalized = [v.lower().replace("-", "_") for v in variants]
+        filtered_config_info = []
+        for config_path, variant_name, checkpoint_dir in config_info:
+            variant_normalized = variant_name.lower().replace("-", "_")
+            if variant_normalized in variants_normalized:
+                filtered_config_info.append((config_path, variant_name, checkpoint_dir))
+            else:
+                logger.info(f"  Skipping {variant_name} (not in requested variants)")
+        
+        if not filtered_config_info:
+            logger.error("No configs match the requested variants!")
+            return
+        
+        config_info = filtered_config_info
+        logger.info(f"Filtered to {len(config_info)} config(s) matching requested variants")
+    
+    logger.info(f"Evaluating {len(config_info)} variant(s)")
+    logger.info("")
+    
+    # Use first config for dataset building (assuming all configs have same dataset settings)
+    first_config_path, _, _ = config_info[0]
+    cfg = build.config(first_config_path)
     
     # Build datasets (once for all variants) based on config split mode
     split_cfg = cfg.get("dataset", {}).get("split", {})
@@ -140,13 +235,18 @@ def run_stress_test(
     total_runs = 0
     start_time = time.time()
     
-    for variant_idx, variant_name in enumerate(variants):
+    for variant_idx, (config_path, variant_name, checkpoint_dir) in enumerate(config_info):
         logger.info("=" * 80)
-        logger.info(f"Evaluating variant: {variant_name} ({variant_idx + 1}/{len(variants)})")
+        logger.info(f"Evaluating variant: {variant_name} ({variant_idx + 1}/{len(config_info)})")
         logger.info("=" * 80)
+        logger.info(f"Config: {config_path}")
+        logger.info(f"Checkpoint dir: {checkpoint_dir}")
         
         # Get fusion type for this variant
         fusion_type = get_fusion_type_from_variant(variant_name)
+        
+        # Load config for this variant (for model loading)
+        variant_cfg = build.config(config_path)
         
         # For k-fold and logo, we need to load a model per fold
         # For item/group splits, we load one model for all folds
@@ -178,7 +278,7 @@ def run_stress_test(
             logger.info("Model loaded successfully")
         
         # Create evaluator
-        evaluator = StressTestEvaluator(device, cfg)
+        evaluator = StressTestEvaluator(device, variant_cfg)
         
         # Evaluate each fold
         for fold_idx, (train_subset, val_subset) in enumerate(folds):
@@ -226,7 +326,7 @@ def run_stress_test(
             
             # Build data loader for this fold (reused for all scenarios and sweeps)
             logger.info(f"    Building data loader for fold {fold_idx + 1}...")
-            val_loader = build_dataloader(val_subset, cfg, shuffle=False, is_val=True)
+            val_loader = build_dataloader(val_subset, variant_cfg, shuffle=False, is_val=True)
             
             # Check if we have baseline cached
             baseline_key = (variant_name, fold_idx)
@@ -320,13 +420,13 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Run experiments evaluation")
-    parser.add_argument("--config", type=str, required=True, help="Path to config YAML")
-    parser.add_argument("--checkpoint-dir", type=str, required=True,
-                       help="Directory with checkpoints (subdirs: bscx, proj_only, etc.)")
+    parser.add_argument("--configs", type=str, nargs="+", required=True,
+                       help="Paths to config YAML files (one per variant)")
     parser.add_argument("--output-dir", type=str, required=True,
                        help="Directory to save results")
     parser.add_argument("--variants", type=str, nargs="+", default=None,
-                       help="Variants to evaluate (default: all)")
+                       help="Variants to evaluate (default: all configs). "
+                            "If provided, filters configs to only those matching the variants.")
     parser.add_argument("--device", type=str, default=None,
                        help="Device (cuda/cpu, default: auto)")
     
@@ -337,8 +437,7 @@ if __name__ == "__main__":
         device = torch.device(args.device)
     
     run_stress_test(
-        config_path=args.config,
-        checkpoint_dir=args.checkpoint_dir,
+        config_paths=args.configs,
         output_dir=args.output_dir,
         variants=args.variants,
         device=device,

@@ -6,17 +6,17 @@ Stress-testing evaluation for BSC_X multi-channel fusion and baseline variants u
 
 ```bash
 python experiments/multichannel_fusion/runner.py \
-    --config configs/EXPT_main.yaml \
-    --checkpoint-dir ./checkpoints \
+    --configs configs/EXPT_BSCX_bscx.yaml \
+              configs/EXPT_BSCX_concat-proj.yaml \
+              configs/EXPT_BSCX_uniform-avg.yaml \
     --output-dir ./stress_test_results
 ```
 
 ### Arguments
 
-- `--config`: Path to YAML config file
-- `--checkpoint-dir`: Directory containing model checkpoints
+- `--configs`: Paths to YAML config files (one per variant).
 - `--output-dir`: Directory to save results
-- `--variants`: List of variants to evaluate (default: all)
+- `--variants`: List of variant names to evaluate (default: all configs). If provided, filters configs.
 - `--device`: Device to use (default: auto-detect)
 
 ## Checkpoint Directory Structure

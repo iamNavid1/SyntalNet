@@ -6,17 +6,19 @@ Stress-testing evaluation for GLR_X multimodal fusion and baseline variants unde
 
 ```bash
 python experiments/multimodal_fusion/runner.py \
-    --config configs/glrx_variants.yaml \
-    --checkpoint-dir checkpoints/glrx_variants/ \
-    --output-dir results/multimodal_fusion/
+    --configs configs/EXPT_GLRX_glrx.yaml \
+              configs/EXPT_GLRX_uniform-avg.yaml \
+              configs/EXPT_GLRX_gated_sum.yaml \
+              configs/EXPT_GLRX_pairwise.yaml \
+              configs/EXPT_GLRX_concat_mlp.yaml \
+    --output-dir multimodal_fusion_results/multimodal_fusion/
 ```
 
 ### Arguments
 
-- `--config`: Path to YAML config file
-- `--checkpoint-dir`: Directory containing model checkpoints
+- `--configs`: Paths to YAML config files (one per variant).
 - `--output-dir`: Directory to save results
-- `--variants`: List of variants to evaluate (default: all)
+- `--variants`: List of variant names to evaluate (default: all configs). If provided, filters configs.
 - `--no-allocation`: Skip allocation tracking experiment
 - `--device`: Device to use (default: auto-detect)
 
