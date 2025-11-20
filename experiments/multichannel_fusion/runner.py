@@ -9,6 +9,10 @@ import yaml
 from pathlib import Path
 import torch
 
+project_root = Path(__file__).resolve().parent.parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
 import models.builders as build
 from experiments.multichannel_fusion.model_loader import (
     load_model_with_fusion_type,
@@ -18,10 +22,6 @@ from experiments.multichannel_fusion.model_loader import (
 from experiments.common.dataset_builder import build_datasets, build_dataloader
 from experiments.multichannel_fusion.evaluator import StressTestEvaluator
 from experiments.common.metrics_collector import MetricsCollector
-
-project_root = Path(__file__).resolve().parent.parent.parent
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
 
 
 # Corruption sweep configurations

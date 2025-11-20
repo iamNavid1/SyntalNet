@@ -6,6 +6,10 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
+project_root = Path(__file__).resolve().parent.parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
 from models.SyntalNet import SyntalNet
 from corruptions import (
     modality_dropout,
@@ -13,10 +17,6 @@ from corruptions import (
     modality_shuffle,
     modality_rescale,
 )
-
-project_root = Path(__file__).resolve().parent.parent.parent
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
 
 
 class CorruptedSyntalNet(nn.Module):

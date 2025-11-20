@@ -6,12 +6,12 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-from models import builders as build
-from models.SyntalNet import SyntalNet
-
 project_root = Path(__file__).resolve().parent.parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
+
+from models import builders as build
+from models.SyntalNet import SyntalNet
 
 
 def load_model_with_fusion_type(

@@ -6,6 +6,10 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
+project_root = Path(__file__).resolve().parent.parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
+
 from models.SyntalNet import SyntalNet
 from experiments.multichannel_fusion.corruptions import (
     stream_dropout,
@@ -15,10 +19,6 @@ from experiments.multichannel_fusion.corruptions import (
     energy_imbalance,
     feature_noise,
 )
-
-project_root = Path(__file__).resolve().parent.parent.parent
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
 
 
 def apply_corruption_to_branch(

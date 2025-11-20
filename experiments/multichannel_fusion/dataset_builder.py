@@ -11,13 +11,13 @@ import torch
 from torch.utils.data import DataLoader, Subset, random_split
 import yaml
 
-from data.dataset import GroupDynamicsDataset
-from data.collate import collate_fn
-from data.transforms import StandardizeTransform
-
 project_root = Path(__file__).resolve().parent.parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
+
+from data.dataset import GroupDynamicsDataset
+from data.collate import collate_fn
+from data.transforms import StandardizeTransform
 
 
 def discover_group_ids(root_dir: str, modalities: List[str]) -> List[int]:
