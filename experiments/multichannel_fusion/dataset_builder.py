@@ -1,16 +1,3 @@
-"""
-Dataset builder for stress testing.
-
-This module creates train/val splits based on the config file's split mode,
-ensuring consistency with training/evaluation splits. Supports:
-- item-based splits
-- group-based splits
-- logo (leave-one-group-out) splits
-- k-fold cross-validation
-
-Each fold's dataloader is built once and can be reused for all corruption scenarios.
-"""
-
 from __future__ import annotations
 from typing import List, Tuple, Optional
 import os
@@ -24,14 +11,13 @@ import torch
 from torch.utils.data import DataLoader, Subset, random_split
 import yaml
 
-# Add project root to path
-project_root = Path(__file__).resolve().parent.parent.parent
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
-
 from data.dataset import GroupDynamicsDataset
 from data.collate import collate_fn
 from data.transforms import StandardizeTransform
+
+project_root = Path(__file__).resolve().parent.parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
 
 def discover_group_ids(root_dir: str, modalities: List[str]) -> List[int]:
@@ -105,15 +91,6 @@ def _create_kfold_splits(
 def build_datasets(cfg: dict) -> List[Tuple[Subset | GroupDynamicsDataset, Subset | GroupDynamicsDataset]]:
     """
     Build datasets based on the split mode specified in the config.
-    
-    This function reads the config file's split configuration and builds
-    datasets accordingly, ensuring consistency with training/evaluation splits.
-    
-    Supported modes:
-    - "item": Item-based random split
-    - "group": Group-based split (specific groups for validation)
-    - "logo": Leave-one-group-out (all groups, one held out per fold)
-    - "kfold": K-fold cross-validation
     
     Args:
         cfg: Configuration dictionary with dataset settings
@@ -210,10 +187,7 @@ def build_kfold_datasets(
 ) -> List[Tuple[Subset, Subset]]:
     """
     Build K-fold CV datasets (backward compatibility).
-    
-    This function is kept for backward compatibility but now delegates
-    to build_datasets() which reads the config.
-    
+        
     Args:
         cfg: Configuration dictionary with dataset settings
         n_folds: Number of folds (ignored if config specifies n_folds)

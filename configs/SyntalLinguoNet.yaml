@@ -1,5 +1,5 @@
 model:
-  name: SyntalVisioLinguoNet
+  name: SyntalLinguoNet
   args:
     ind_cls_heads: ["Engagement", "Lead"]
     grp_cls_heads: ["Synchrony", "Confidence", "Transition"]
@@ -9,7 +9,7 @@ model:
 dataset:
   args:
     root_dir: "./dataset"
-    modalities: ["face", "pose", "video", "turns", "utterance",]
+    modalities: ["turns", "utterance"]
   split:
     mode: "kfold"  # "kfold", "logo", "item", "group"
     n_folds: 5
@@ -19,7 +19,7 @@ dataset:
 
 training:
   seed: 42
-  num_workers: 4
+  num_workers: 5
   prefetch_factor: 4
   epochs: 100
   batch_size: 12
@@ -28,21 +28,22 @@ training:
   min_lr: 1.e-5
   warmup_ratio: 0.1
   weight_decay: 0.002
-  scheduler: "cosine_decay"  # cosine_decay, one_cycle
+  scheduler: "cosine_decay"
   grad_clip: 1.
   accum_steps: 4
-  log_interval: 37
-  track_fusion_aux: True,
-  track_classifier_aux: True,
+  log_interval: 0
+  track_fusion_aux: False
+  track_classifier_aux: False
   loss_type: "multiclass"
   amp: False
   cb_beta: 0.9995
   focal_gamma: 2.
   la_tau: 0.
   label_smoothing: 0.01
-  val_interval: 1
+  val_interval: 10
   ckpt_interval: 10
 
 logging:
-  log_dir: ./logs/SyntalVisioLinguoNet
-  checkpoint_dir: ./checkpoints/SyntalVisioLinguoNet
+  log_dir: ./logs/SyntalLinguoNet
+  checkpoint_dir: ./checkpoints/SyntalLinguoNet
+

@@ -1,10 +1,3 @@
-"""
-Evaluator for stress-testing models with corruptions.
-
-This module provides functionality to evaluate models under various
-corruption scenarios and collect metrics.
-"""
-
 from __future__ import annotations
 from typing import Dict, List, Optional, Tuple, Any
 import os
@@ -14,14 +7,13 @@ import torch
 from torch.utils.data import DataLoader
 from torch.amp import autocast
 
-# Add project root to path
+from engine.utils import modalities_to_branches, BuildAutocastKWargs
+from experiments.multichannel_fusion.model_wrapper import CorruptedSyntalNet, create_corruption_fn
+from utils.metrics import build_classification_metrics, compute_metrics
+
 project_root = Path(__file__).resolve().parent.parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
-
-from engine.utils import modalities_to_branches, BuildAutocastKWargs
-from experiments.bscx_stress_test.model_wrapper import CorruptedSyntalNet, create_corruption_fn
-from utils.metrics import build_classification_metrics, compute_metrics
 
 
 class StressTestEvaluator:

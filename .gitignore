@@ -6,12 +6,7 @@
 *.pth
 *.json
 *.png
-
-# scripts
-*.sh
-
-# Jupyter Notebook
-.ipynb_checkpoints
+*.pdf
 
 # Environments
 .env
@@ -23,10 +18,8 @@ ENV/
 env.bak/
 venv.bak/
 
-# Visual Studio Code
+# IDE
 .vscode/
-
-# Cursor
 .cursorignore
 .cursorindexingignore
 
@@ -36,3 +29,4 @@ __pycache__/
 # Logs
 *.log
 logs/
+*.out

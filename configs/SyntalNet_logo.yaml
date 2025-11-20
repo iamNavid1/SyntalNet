@@ -5,15 +5,13 @@ model:
     grp_cls_heads: ["Synchrony", "Confidence", "Transition"]
     cls_head_type: "cosine"
     proto_warmup_epochs: 3
-    mm_fusion_type: "uniform_avg"
 
 dataset:
   args:
     root_dir: "./dataset"
     modalities: ["face", "pose", "video", "turns", "utterance", "sentiment", "prosody", "audio",]
   split:
-    mode: "kfold"  # "kfold", "logo", "item", "group"
-    n_folds: 5
+    mode: "logo"  # "kfold", "logo", "item", "group"
     seed: 17
   stats_dir: "./configs/normalization_stats.yaml"
   cls_count_dir: "./configs/class_counts.yaml"
@@ -33,8 +31,8 @@ training:
   grad_clip: 1.
   accum_steps: 4
   log_interval: 0
-  track_fusion_aux: False
-  track_classifier_aux: False
+  track_fusion_aux: False,
+  track_classifier_aux: False,
   loss_type: "multiclass"
   amp: False
   cb_beta: 0.9995
@@ -45,5 +43,5 @@ training:
   ckpt_interval: 10
 
 logging:
-  log_dir: ./logs/EXPT_GLRX_uniform-avg
-  checkpoint_dir: ./checkpoints/EXPT_GLRX_uniform-avg
+  log_dir: ./logs/SyntalNet_logo
+  checkpoint_dir: ./checkpoints/SyntalNet_logo

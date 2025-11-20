@@ -19,7 +19,7 @@ dataset:
 
 training:
   seed: 42
-  num_workers: 4
+  num_workers: 5
   prefetch_factor: 4
   epochs: 100
   batch_size: 12

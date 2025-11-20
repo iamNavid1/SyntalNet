@@ -7,7 +7,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # ------------------------------------------------------------------
-# Global style to match the barplot aesthetic
+# Global style 
 # ------------------------------------------------------------------
 plt.rcParams.update({
     "font.family": "DejaVu Sans",

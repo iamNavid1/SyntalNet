@@ -1,57 +1,52 @@
-"""
-Metrics collector and CSV exporter for stress test results.
-
-This module collects metrics across folds and corruption scenarios,
-computes statistics, and exports to CSV.
-"""
-
 from __future__ import annotations
 from typing import Dict, List, Optional, Any
 import csv
 import os
-from pathlib import Path
 import numpy as np
 from collections import defaultdict
 
 
-class MetricsCollector:
+class SOSEXMetricsCollector:
     """
-    Collects metrics across folds and corruption scenarios.
+    Collects metrics across folds and model variants for SOSEX experiments.
+    Only collects: AUPRC macro, AUROC macro, balanced accuracy, F1 macro.
     """
+    
+    # Metrics to extract
+    TARGET_METRICS = ["auprc_macro", "auroc_macro", "balanced_accuracy", "f1_macro"]
+    
     def __init__(self):
-        self.results: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        self.results: List[Dict[str, Any]] = []
     
     def add_result(
         self,
-        model_variant: str,
-        corruption_type: str,
-        corruption_param: float | int,
-        fold_idx: int,
+        variant_name: str,
+        fold_idx: Optional[int],
         metrics: Dict[str, Dict[str, Dict[str, float]]],
     ):
         """
         Add a result from a single evaluation run.
         
         Args:
-            model_variant: Name of model variant (e.g., "bscx", "proj_only")
-            corruption_type: Type of corruption (e.g., "stream_dropout")
-            corruption_param: Parameter value for corruption
-            fold_idx: Fold index (0-4)
+            variant_name: Name of model variant (e.g., "w-mp-fus_wo-grp-cls")
+            fold_idx: Fold index (None for single fold, int for kfold/logo)
             metrics: Nested dict {split: {head: {metric: value}}}
         """
-        # Flatten metrics structure
+        # Extract only target metrics for all heads
         for split in metrics:
             for head_name in metrics[split]:
                 for metric_name, metric_value in metrics[split][head_name].items():
-                    # Skip per-class metrics for now (can be added later)
+                    # Only collect target metrics
+                    if metric_name not in self.TARGET_METRICS:
+                        continue
+                    
+                    # Skip per-class metrics (arrays/lists)
                     if isinstance(metric_value, (list, np.ndarray)):
                         continue
                     
-                    self.results["all"].append({
-                        "model_variant": model_variant,
-                        "corruption_type": corruption_type,
-                        "corruption_param": corruption_param,
-                        "fold": fold_idx,
+                    self.results.append({
+                        "variant": variant_name,
+                        "fold": fold_idx if fold_idx is not None else "single",
                         "split": split,
                         "head": head_name,
                         "metric": metric_name,
@@ -60,19 +55,17 @@ class MetricsCollector:
     
     def compute_statistics(self) -> Dict[str, List[Dict[str, Any]]]:
         """
-        Compute mean and std across folds for each (variant, corruption, param, split, head, metric).
+        Compute statistics across folds for each (variant, split, head, metric).
         
         Returns:
             Dict with keys "per_fold" and "aggregated"
         """
-        # Group by (variant, corruption, param, split, head, metric)
+        # Group by (variant, split, head, metric)
         grouped = defaultdict(list)
         
-        for row in self.results["all"]:
+        for row in self.results:
             key = (
-                row["model_variant"],
-                row["corruption_type"],
-                row["corruption_param"],
+                row["variant"],
                 row["split"],
                 row["head"],
                 row["metric"],
@@ -82,13 +75,11 @@ class MetricsCollector:
         # Compute statistics
         aggregated = []
         for key, values in grouped.items():
-            variant, corr_type, corr_param, split, head, metric = key
+            variant, split, head, metric = key
             values_arr = np.array(values)
             
             aggregated.append({
-                "model_variant": variant,
-                "corruption_type": corr_type,
-                "corruption_param": corr_param,
+                "variant": variant,
                 "split": split,
                 "head": head,
                 "metric": metric,
@@ -96,18 +87,21 @@ class MetricsCollector:
                 "std": float(np.std(values_arr)),
                 "min": float(np.min(values_arr)),
                 "max": float(np.max(values_arr)),
+                "median": float(np.median(values_arr)),
+                "q1": float(np.percentile(values_arr, 25)),
+                "q3": float(np.percentile(values_arr, 75)),
                 "n_folds": len(values),
             })
         
         return {
-            "per_fold": self.results["all"],
+            "per_fold": self.results,
             "aggregated": aggregated,
         }
     
     def export_csv(
         self,
         output_dir: str,
-        filename_prefix: str = "stress_test_results",
+        filename_prefix: str = "sosex_experiments_results",
     ):
         """
         Export results to CSV files.
@@ -141,25 +135,4 @@ class MetricsCollector:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(rows)
-    
-    def get_baseline_key(self) -> tuple:
-        """Return the key that represents baseline (no corruption)."""
-        return ("baseline", None, 0.0, None, None, None)
-    
-    def is_baseline(
-        self,
-        corruption_type: str,
-        corruption_param: float | int,
-    ) -> bool:
-        """
-        Check if a corruption configuration represents baseline (no corruption).
-        """
-        baseline_conditions = {
-            "stream_dropout": corruption_param == 0.0,
-            "channel_dropout": corruption_param == 0.0,
-            "temporal_band": corruption_param == 0.0,
-            "jitter": corruption_param == 0,
-            "energy": corruption_param == 1.0,
-        }
-        return baseline_conditions.get(corruption_type, False)
 

@@ -1,10 +1,3 @@
-"""
-Model wrapper for injecting corruptions into multi-channel fusion.
-
-This module provides a wrapper that uses forward hooks to intercept
-branch outputs before fusion and apply corruption functions.
-"""
-
 from __future__ import annotations
 from typing import Dict, List, Optional, Callable, Tuple, Any
 import os
@@ -13,13 +6,8 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-# Add project root to path
-project_root = Path(__file__).resolve().parent.parent.parent
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
-
 from models.SyntalNet import SyntalNet
-from experiments.bscx_stress_test.corruptions import (
+from experiments.multichannel_fusion.corruptions import (
     stream_dropout,
     channel_dropout,
     temporal_band_mask,
@@ -28,23 +16,9 @@ from experiments.bscx_stress_test.corruptions import (
     feature_noise,
 )
 
-
-class CorruptionHook:
-    """
-    Hook that intercepts Zs and Ms before mc_fusion and applies corruption.
-    """
-    def __init__(self, corruption_fn: Optional[Callable]):
-        self.corruption_fn = corruption_fn
-        self.zs_buffer = None
-        self.ms_buffer = None
-        self.hook_handle = None
-    
-    def __call__(self, module, input, output):
-        """Hook function that captures Zs and Ms before fusion."""
-        # The hook is registered on mc_fusion, but we need to capture
-        # the inputs (zs, ms) before they reach fusion
-        # This is tricky - we'll use a different approach
-        pass
+project_root = Path(__file__).resolve().parent.parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
 
 def apply_corruption_to_branch(
@@ -53,7 +27,6 @@ def apply_corruption_to_branch(
 ) -> nn.Module:
     """
     Apply corruption to a Branch by patching its forward method.
-    
     This creates a wrapper that intercepts Zs and Ms before mc_fusion.
     """
     if corruption_fn is None:

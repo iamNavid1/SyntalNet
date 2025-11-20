@@ -174,6 +174,7 @@ class TemporalCNN(BaseModel):
         self.hidden_size = hidden_size
         self.dropout = dropout
         self.branch_names = tuple(BRANCH_MODALITY_MAP.keys())
+        self.branches = nn.ModuleDict()
         self.feature_dim_to_mod = {
             FEATURE_DIMS[name]: name for name in FEATURE_DIMS
         }
@@ -308,18 +309,17 @@ class TemporalCNN(BaseModel):
 
     def forward(
         self,
-        batch_data: Dict[str, Tuple[Optional[List[torch.Tensor]], Optional[List[torch.Tensor]], Optional[torch.Tensor], Optional[torch.Tensor]]],
+        batch_data: Dict[str, Dict[str, Tuple[torch.Tensor, torch.Tensor]]],
         epoch: Optional[int] = None,
     ) -> Tuple[Dict[str, torch.Tensor | Dict[str, torch.Tensor]], Dict[str, Dict[str, torch.Tensor]]]:
         # determine batch shape and device
         first_tensor: Optional[torch.Tensor] = None
-        for values in batch_data.values():
-            feat_list, _, emb_tensor, _ = values
-            if feat_list:
-                first_tensor = feat_list[0]
-                break
-            if emb_tensor is not None:
-                first_tensor = emb_tensor
+        for branch_dict in batch_data.values():
+            for mod_name, (mod_tensor, _) in branch_dict.items():
+                if mod_tensor is not None:
+                    first_tensor = mod_tensor
+                    break
+            if first_tensor is not None:
                 break
         if first_tensor is None:
             raise ValueError("Batch data is empty; cannot infer batch dimensions")
@@ -329,11 +329,29 @@ class TemporalCNN(BaseModel):
         B, P = first_tensor.shape[:2]
         for branch in self.branch_names:
             if branch in batch_data:
-                feat_tensors, feat_masks, emb_tensor, emb_mask = batch_data[branch]
+                branch_mods = batch_data[branch]
+                spec = BRANCH_MODALITY_MAP[branch]
+                
+                # Extract feature tensors and masks
+                feat_tensors: List[torch.Tensor] = []
+                feat_masks: List[torch.Tensor] = []
+                for mod_name in spec["feat"]:
+                    if mod_name in branch_mods:
+                        mod_tensor, mod_mask = branch_mods[mod_name]
+                        feat_tensors.append(mod_tensor)
+                        feat_masks.append(mod_mask)
+                
+                # Extract embedding tensor and mask
+                emb_tensor: Optional[torch.Tensor] = None
+                emb_mask: Optional[torch.Tensor] = None
+                emb_name = spec["emb"]
+                if emb_name in branch_mods:
+                    emb_tensor, emb_mask = branch_mods[emb_name]
+                
                 branch_features[branch] = self._encode_branch(
                     branch,
-                    feat_tensors,
-                    feat_masks,
+                    feat_tensors if feat_tensors else None,
+                    feat_masks if feat_masks else None,
                     emb_tensor,
                     emb_mask,
                     device,

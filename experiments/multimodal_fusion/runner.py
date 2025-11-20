@@ -1,13 +1,3 @@
-"""
-Main runner for stress-testing evaluation suite.
-
-This module orchestrates the complete evaluation pipeline:
-- 5-fold cross-validation
-- Multiple model variants
-- Multiple corruption scenarios with parameter sweeps
-- Metrics collection and CSV export
-"""
-
 from __future__ import annotations
 from typing import Dict, List, Optional, Tuple
 import os
@@ -18,40 +8,49 @@ import gc
 from pathlib import Path
 import torch
 
-# Add project root to path
+import models.builders as build
+from experiments.multimodal_fusion.model_loader import (
+    load_model_with_fusion_type,
+    get_fusion_type_from_variant,
+    find_checkpoint_path,
+)
+from experiments.common.dataset_builder import build_datasets, build_dataloader
+from experiments.multimodal_fusion.evaluator import StressTestEvaluator
+from experiments.common.metrics_collector import MetricsCollector
+from experiments.multimodal_fusion.allocation_tracker import run_allocation_tracking
+
 project_root = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(project_root))
-
-from models.builders import load_config
-from experiments.bscx_stress_test.model_loader import load_model_with_fusion_type, get_fusion_type_from_variant
-from experiments.bscx_stress_test.dataset_builder import build_datasets, build_dataloader
-from experiments.bscx_stress_test.evaluator import StressTestEvaluator
-from experiments.bscx_stress_test.metrics_collector import MetricsCollector
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
 
-# Corruption sweep configurations
+# Corruption sweep configurations (4-point sweeps matching BSCX style)
 CORRUPTION_SWEEPS = {
-    # "stream_dropout": [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
-    # "channel_dropout": [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
-    "temporal_band": [0.0, 0.15, 0.3, 0.45, 0.6, 0.75],
-    "jitter": [0, 5, 10, 15, 20, 25],
-    # "energy": [1.0, 0.1, 0.5, 2, 5.0, 10.0],
-    "noise": [0.0, 0.15, 0.3, 0.45, 0.6, 0.75],
+    "modality_dropout": [0.0, 0.15, 0.3, 0.45, 0.6, 0.75],
+    "modality_noise": [0.0, 0.15, 0.3, 0.45, 0.6, 0.75],
+    "modality_shuffle": [0.0, 0.15, 0.3, 0.45, 0.6, 0.75],
+    "modality_rescale": [0.1, 0.5, 1.0, 2.0, 5.0, 10.0],
 }
 
+# Noise levels for allocation tracking
+ALLOCATION_NOISE_LEVELS = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+
 # Model variants to evaluate
-MODEL_VARIANTS = ["bscx", "concat_proj", "uniform_avg"]
+MODEL_VARIANTS = ["glrx", "uniform_avg", "gated_sum", "pairwise", "concat_mlp"]
 
 
 def setup_logging(output_dir: str) -> logging.Logger:
     """Set up logging to both file and console."""
     os.makedirs(output_dir, exist_ok=True)
     
-    log_file = os.path.join(output_dir, "stress_test.log")
+    log_file = os.path.join(output_dir, "multimodal_fusion.log")
     
     # Create logger
-    logger = logging.getLogger("stress_test")
+    logger = logging.getLogger("multimodal_fusion")
     logger.setLevel(logging.INFO)
+    
+    # Remove existing handlers to avoid duplicates
+    logger.handlers.clear()
     
     # File handler
     fh = logging.FileHandler(log_file, mode='w')
@@ -76,12 +75,10 @@ def setup_logging(output_dir: str) -> logging.Logger:
 def is_baseline(corruption_type: str, param: float | int) -> bool:
     """Check if a corruption configuration is baseline (no corruption)."""
     baseline_conditions = {
-        "stream_dropout": param == 0.0,
-        "channel_dropout": param == 0.0,
-        "temporal_band": param == 0.0,
-        "jitter": param == 0,
-        "energy": param == 1.0,
-        "noise": param == 0.0,
+        "modality_dropout": param == 0.0,
+        "modality_noise": param == 0.0,
+        "modality_shuffle": param == 0.0,
+        "modality_rescale": param == 1.0,
     }
     return baseline_conditions.get(corruption_type, False)
 
@@ -92,9 +89,10 @@ def run_stress_test(
     output_dir: str,
     variants: Optional[List[str]] = None,
     device: Optional[torch.device] = None,
+    enable_allocation_tracking: bool = True,
 ):
     """
-    Run complete stress test evaluation.
+    Run complete GLRX stress test evaluation.
     
     Args:
         config_path: Path to base config YAML
@@ -102,6 +100,7 @@ def run_stress_test(
         output_dir: Directory to save results
         variants: List of variant names to evaluate (default: all)
         device: Device to run on (default: auto-detect)
+        enable_allocation_tracking: Whether to run allocation tracking experiments
     
     Note:
         The split mode and number of folds are determined by the config file's
@@ -119,17 +118,18 @@ def run_stress_test(
     logger = setup_logging(output_dir)
     
     logger.info("=" * 80)
-    logger.info("Starting Stress Test Evaluation")
+    logger.info("Starting GLRX Stress Test Evaluation")
     logger.info("=" * 80)
     logger.info(f"Config: {config_path}")
     logger.info(f"Checkpoint dir: {checkpoint_dir}")
     logger.info(f"Output dir: {output_dir}")
     logger.info(f"Variants: {variants}")
     logger.info(f"Device: {device}")
+    logger.info(f"Allocation tracking: {enable_allocation_tracking}")
     logger.info("")
     
     # Load config
-    cfg = load_config(config_path)
+    cfg = build.config(config_path)
     
     # Build datasets (once for all variants) based on config split mode
     split_cfg = cfg.get("dataset", {}).get("split", {})
@@ -155,32 +155,37 @@ def run_stress_test(
         logger.info(f"Evaluating variant: {variant_name} ({variant_idx + 1}/{len(variants)})")
         logger.info("=" * 80)
         
-        # Load model for this variant
+        # Get fusion type for this variant
         fusion_type = get_fusion_type_from_variant(variant_name)
-        checkpoint_path = os.path.join(checkpoint_dir, variant_name, "best.pth")
         
-        # Try alternative checkpoint names
-        if not os.path.exists(checkpoint_path):
-            alt_names = ["latest.pth", "epoch_99.pth", "checkpoint.pth"]
-            for alt_name in alt_names:
-                alt_path = os.path.join(checkpoint_dir, variant_name, alt_name)
-                if os.path.exists(alt_path):
-                    checkpoint_path = alt_path
-                    break
-        
-        if not os.path.exists(checkpoint_path):
-            logger.warning(f"Checkpoint not found: {checkpoint_path}")
-            logger.warning(f"Skipping variant {variant_name}")
-            continue
-        
-        logger.info(f"Loading model: {checkpoint_path}")
-        model = load_model_with_fusion_type(
-            config_path,
-            checkpoint_path,
-            fusion_type=fusion_type,
-            device=device,
-        )
-        logger.info("Model loaded successfully")
+        # For k-fold and logo, we need to load a model per fold
+        # For item/group splits, we load one model for all folds
+        if split_mode in ("kfold", "logo"):
+            # Model will be loaded per fold
+            model = None
+        else:
+            # Load model once for all folds (item, group splits)
+            checkpoint_path = find_checkpoint_path(
+                checkpoint_dir,
+                variant_name,
+                split_mode,
+                fold_idx=None,
+            )
+            
+            if checkpoint_path is None:
+                logger.warning(f"Checkpoint not found for variant {variant_name}")
+                logger.warning(f"  Searched in: {os.path.join(checkpoint_dir, variant_name)}")
+                logger.warning(f"Skipping variant {variant_name}")
+                continue
+            
+            logger.info(f"Loading model: {checkpoint_path}")
+            model = load_model_with_fusion_type(
+                config_path,
+                checkpoint_path,
+                fusion_type=fusion_type,
+                device=device,
+            )
+            logger.info("Model loaded successfully")
         
         # Create evaluator
         evaluator = StressTestEvaluator(device, cfg)
@@ -188,6 +193,44 @@ def run_stress_test(
         # Evaluate each fold
         for fold_idx, (train_subset, val_subset) in enumerate(folds):
             logger.info(f"  Fold {fold_idx + 1}/{n_folds}")
+            
+            # For k-fold and logo, load model for this specific fold
+            if split_mode in ("kfold", "logo"):
+                # For logo mode, extract the held-out group ID from the validation dataset
+                held_out_group = None
+                if split_mode == "logo":
+                    # Get the group ID from the validation dataset
+                    if hasattr(val_subset, "group_ids") and len(val_subset.group_ids) == 1:
+                        held_out_group = val_subset.group_ids[0]
+                    elif hasattr(val_subset, "dataset") and hasattr(val_subset.dataset, "group_ids"):
+                        held_out_group = val_subset.dataset.group_ids[0] if len(val_subset.dataset.group_ids) == 1 else None
+                
+                checkpoint_path = find_checkpoint_path(
+                    checkpoint_dir,
+                    variant_name,
+                    split_mode,
+                    fold_idx=fold_idx,
+                    held_out_group=held_out_group,
+                )
+                
+                if checkpoint_path is None:
+                    logger.warning(f"Checkpoint not found for variant {variant_name}, fold {fold_idx}")
+                    if split_mode == "kfold":
+                        logger.warning(f"  Searched in: {os.path.join(checkpoint_dir, variant_name, 'kfold', f'fold_{fold_idx:02d}')}")
+                    elif split_mode == "logo":
+                        search_path = os.path.join(checkpoint_dir, variant_name, "logo", f"fold_{held_out_group:02d}") if held_out_group else os.path.join(checkpoint_dir, variant_name, "logo")
+                        logger.warning(f"  Searched in: {search_path}")
+                    logger.warning(f"Skipping fold {fold_idx + 1} for variant {variant_name}")
+                    continue
+                
+                logger.info(f"    Loading model for fold {fold_idx + 1}: {checkpoint_path}")
+                model = load_model_with_fusion_type(
+                    config_path,
+                    checkpoint_path,
+                    fusion_type=fusion_type,
+                    device=device,
+                )
+                logger.info(f"    Model loaded successfully for fold {fold_idx + 1}")
             
             # Build data loader for this fold (reused for all scenarios and sweeps)
             logger.info(f"    Building data loader for fold {fold_idx + 1}...")
@@ -242,12 +285,38 @@ def run_stress_test(
                     
                     total_runs += 1
             
-            # Cleanup data loader for this fold before moving to next fold
+            # Run allocation tracking experiment (only for GLR_X variant)
+            if enable_allocation_tracking and variant_name.lower() in ("glrx", "glr_x", "glr"):
+                logger.info(f"    Running allocation tracking for fold {fold_idx + 1}...")
+                alloc_output_dir = os.path.join(output_dir, "allocation_tracking")
+                try:
+                    alloc_path = run_allocation_tracking(
+                        model=model,
+                        dataloader=val_loader,
+                        device=device,
+                        cfg=cfg,
+                        variant_name=variant_name,
+                        fold_idx=fold_idx,
+                        output_dir=alloc_output_dir,
+                        noise_levels=ALLOCATION_NOISE_LEVELS,
+                    )
+                    logger.info(f"    Allocation tracking saved to: {alloc_path}")
+                except Exception as e:
+                    logger.error(f"    Allocation tracking failed: {str(e)}")
+            
+            # Cleanup data loader and model (for k-fold/logo) for this fold before moving to next fold
             logger.info(f"    Cleaning up data loader for fold {fold_idx + 1}...")
             del val_loader
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            if split_mode in ("kfold", "logo"):
+                # For k-fold/logo, we need to free the model memory before loading the next fold's model
+                del model
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            else:
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
         
         logger.info("")
     
@@ -256,7 +325,7 @@ def run_stress_test(
     logger.info("Exporting results...")
     per_fold_path, aggregated_path = collector.export_csv(
         output_dir,
-        filename_prefix="stress_test_results"
+        filename_prefix="multimodal_fusion_results"
     )
     logger.info(f"Per-fold results: {per_fold_path}")
     logger.info(f"Aggregated results: {aggregated_path}")
@@ -269,23 +338,26 @@ def run_stress_test(
     logger.info("=" * 80)
     logger.info(f"Total runs: {total_runs}")
     logger.info(f"Total time: {elapsed:.1f}s ({elapsed/60:.1f} minutes)")
-    logger.info(f"Average time per run: {elapsed/total_runs:.2f}s")
+    if total_runs > 0:
+        logger.info(f"Average time per run: {elapsed/total_runs:.2f}s")
     logger.info("")
 
 
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description="Run stress test evaluation")
+    parser = argparse.ArgumentParser(description="Run experiments evaluation")
     parser.add_argument("--config", type=str, required=True, help="Path to config YAML")
     parser.add_argument("--checkpoint-dir", type=str, required=True,
-                       help="Directory with checkpoints (subdirs: bscx, proj_only, etc.)")
+                       help="Directory with checkpoints (subdirs: glrx, uniform_avg, etc.)")
     parser.add_argument("--output-dir", type=str, required=True,
                        help="Directory to save results")
     parser.add_argument("--variants", type=str, nargs="+", default=None,
                        help="Variants to evaluate (default: all)")
     parser.add_argument("--device", type=str, default=None,
                        help="Device (cuda/cpu, default: auto)")
+    parser.add_argument("--no-allocation", action="store_true",
+                       help="Skip allocation tracking experiments")
     
     args = parser.parse_args()
     
@@ -299,5 +371,6 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         variants=args.variants,
         device=device,
+        enable_allocation_tracking=(not args.no_allocation),
     )
 

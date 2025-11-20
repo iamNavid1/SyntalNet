@@ -1,10 +1,3 @@
-"""
-Corruption functions for stress-testing multi-channel fusion modules.
-
-All functions operate on lists of feature tensors (zs) and mask tensors (ms),
-where each tensor has shape (B, C, T, F_) for batch, channels, time, features.
-"""
-
 from __future__ import annotations
 from typing import List, Tuple, Optional
 import torch
@@ -67,6 +60,14 @@ def stream_dropout(
     
     # Sample keep mask: (B, num_streams)
     keep = torch.rand((B, num_streams), device=device) > p_drop
+    
+    # If all streams are dropped, randomly keep one
+    all_dropped = (keep.sum(dim=1) == 0)  # (B,)
+    if all_dropped.any():
+        for b in range(B):
+            if all_dropped[b]:
+                stream_to_keep = int(torch.randint(0, num_streams, (1,), device=device).item())
+                keep[b, stream_to_keep] = True
     
     zs_out, ms_out = [], []
     for s, (z, m) in enumerate(zip(zs, ms)):
@@ -265,7 +266,7 @@ def feature_noise(
         zs: List of feature tensors, each (B, C, T, F_)
         ms: List of mask tensors, each (B, 1 or C, T, F_)
         noise_level: Relative noise std; 0.0 = no noise,
-                    0.2 means sigma_noise ≈ 0.2 * feature_std (per batch).
+                    0.2 means sigma_noise ≈ 0.2 * feature_std (per sample).
     
     Returns:
         (zs_noisy, ms)  # masks unchanged
