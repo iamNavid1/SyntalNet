@@ -815,8 +815,8 @@ def main():
     parser.add_argument(
         "--lr-divisor",
         type=int,
-        default=5,
-        help="Divide base LR by this factor for fine-tuning (default: 5 for Exp1, unused for Exp3)"
+        default=1,
+        help="Divide base LR by this factor for fine-tuning (default: 1 for Exp1, unused for Exp3)"
     )
     parser.add_argument(
         "--seed",
@@ -839,6 +839,20 @@ def main():
     
     # Load config
     cfg = build.config(args.config)
+    
+    # Override proto_warmup_epochs to 0 for fine-tuning experiments
+    if "model" in cfg and "args" in cfg["model"]:
+        original_warmup = cfg["model"]["args"].get("proto_warmup_epochs", 0)
+        cfg["model"]["args"]["proto_warmup_epochs"] = 0
+        if original_warmup != 0:
+            logger.info(f"Overriding proto_warmup_epochs from {original_warmup} to 0 for fine-tuning")
+    
+    # Override warmup_ratio to 0.05 for fine-tuning experiments
+    if "training" in cfg:
+        original_warmup_ratio = cfg["training"].get("warmup_ratio", 0.1)
+        cfg["training"]["warmup_ratio"] = 0.05
+        if original_warmup_ratio != 0.05:
+            logger.info(f"Overriding warmup_ratio from {original_warmup_ratio} to 0.05 for fine-tuning")
     
     # Device
     if args.device:
