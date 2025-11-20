@@ -194,8 +194,8 @@ def run_data_portion_sweep(
     device: torch.device,
     logger: logging.Logger,
     data_proportions: List[float] = None,
-    finetune_epochs: int = 10,
-    finetune_lr_divisor: int = 3,
+    full_finetune_epochs: int = 20,
+    finetune_lr_divisor: int = 5,
     seed: int = 42,
 ) -> OODAdaptationMetricsCollector:
     """
@@ -206,7 +206,7 @@ def run_data_portion_sweep(
         - For each data proportion:
             - Sample that proportion from left-out group for fine-tuning
             - Use remainder as test set
-            - Fine-tune for fixed number of epochs
+            - Fine-tune for fixed number of epochs (unfreeze all layers)
             - Evaluate after each epoch
     
     Args:
@@ -216,8 +216,8 @@ def run_data_portion_sweep(
         device: Device to run on
         logger: Logger instance
         data_proportions: List of proportions to sweep (default: [0, 0.05, 0.10, 0.15, 0.20, 0.25])
-        finetune_epochs: Number of epochs for fine-tuning (default: 10)
-        finetune_lr_divisor: Divide base LR by this factor for fine-tuning (default: 3)
+        full_finetune_epochs: Number of epochs for full fine-tuning (all layers) (default: 20)
+        finetune_lr_divisor: Divide base LR by this factor for fine-tuning (default: 5)
         seed: Random seed for data sampling
     
     Returns:
@@ -237,7 +237,7 @@ def run_data_portion_sweep(
     logger.info(f"Number of LOGO folds: {len(all_groups)}")
     logger.info(f"Groups (held-out): {all_groups}")
     logger.info(f"Data proportions: {data_proportions}")
-    logger.info(f"Fine-tuning epochs: {finetune_epochs}")
+    logger.info(f"Full fine-tuning epochs: {full_finetune_epochs}")
     logger.info(f"Base LR: {cfg['training']['learning_rate']}")
     logger.info(f"Fine-tuning LR: {cfg['training']['learning_rate'] / finetune_lr_divisor}")
     logger.info(f"Seed: {seed}")
@@ -248,7 +248,7 @@ def run_data_portion_sweep(
     collector.metadata["n_folds"] = len(all_groups)
     collector.metadata["base_model"] = cfg["model"]["name"]
     collector.metadata["data_proportions"] = data_proportions
-    collector.metadata["finetune_epochs"] = finetune_epochs
+    collector.metadata["full_finetune_epochs"] = full_finetune_epochs
     
     # Iterate over all folds
     for fold_idx, held_out_group in enumerate(all_groups):
@@ -352,18 +352,18 @@ def run_data_portion_sweep(
                 
                 optimizer = build_optimizer(model, finetune_cfg)
                 
-                # Create scheduler
+                # Create scheduler (warmup only, then constant LR)
                 accum = max(1, cfg["training"].get("accum_steps", 1))
-                total_steps = math.ceil(len(train_loader) / accum) * finetune_epochs
+                total_steps = math.ceil(len(train_loader) / accum) * full_finetune_epochs
+                warmup_steps = int(cfg["training"].get("warmup_ratio", 0) * total_steps)
                 scheduler_cfg = {
-                    "warmup_steps": int(cfg["training"].get("warmup_ratio", 0) * total_steps),
+                    "warmup_steps": warmup_steps,
                     "max_steps": total_steps,
-                    "min_lr": finetune_lr,
-                    "type": cfg["training"].get("scheduler", "cosine_decay"),
+                    "type": "warmup_constant",
                 }
                 scheduler = build_scheduler(optimizer, scheduler_cfg)
                 
-                # Create fine-tuner
+                # Create fine-tuner (unfreeze all layers for Experiment 1)
                 finetuner = FineTuner(
                     cfg=cfg,
                     model=model,
@@ -375,11 +375,12 @@ def run_data_portion_sweep(
                     logger=logger,
                     writer=None,
                     world_size=1,
+                    freeze_backbone=False,  # Unfreeze all layers
                 )
                 
                 # Fine-tune for specified epochs
-                for epoch in range(1, finetune_epochs + 1):
-                    logger.info(f"  Epoch {epoch}/{finetune_epochs}")
+                for epoch in range(1, full_finetune_epochs + 1):
+                    logger.info(f"  Epoch {epoch}/{full_finetune_epochs}")
                     
                     # Train
                     train_loss = finetuner.train_epoch(epoch)
@@ -450,209 +451,82 @@ def run_epoch_sweep(
     device: torch.device,
     logger: logging.Logger,
     exp1_collector: Optional[OODAdaptationMetricsCollector] = None,
-    fixed_proportion: float = 0.10,
     epochs_to_extract: List[int] = None,
-    extra_epochs: List[int] = None,
-    finetune_lr_divisor: int = 3,
     seed: int = 42,
 ) -> OODAdaptationMetricsCollector:
     """
-    Run Experiment 2: Epoch sweep with fixed data portion.
+    Run Experiment 2: Epoch sweep analysis (post-processing from Experiment 1).
     
-    For each LOGO fold:
-        - Load base model checkpoint
-        - Sample fixed proportion from left-out group
-        - Extract metrics at specified epochs from Experiment 1 (if available)
-        - Continue training for extra epochs (if specified)
-        - Evaluate after each epoch
+    For each LOGO fold and each data portion used in Experiment 1:
+        - Extract metrics at specified epochs [2, 8, 12, 16, 20] from Experiment 1 logs
+        - Organize into separate results structure
+    
+    This is a post-processing step with no new model training.
     
     Args:
         cfg: Configuration dictionary
-        checkpoint_base_dir: Base directory containing LOGO checkpoints
+        checkpoint_base_dir: Base directory containing LOGO checkpoints (unused, kept for compatibility)
         output_dir: Directory to save results
-        device: Device to run on
+        device: Device to run on (unused, kept for compatibility)
         logger: Logger instance
-        exp1_collector: Metrics collector from Experiment 1 (to extract existing results)
-        fixed_proportion: Fixed proportion of data to use (default: 0.10)
-        epochs_to_extract: Epochs to extract from Experiment 1 (default: [2, 4, 6, 8, 10])
-        extra_epochs: Additional epochs to train (default: [12, 15, 18, 20])
-        finetune_lr_divisor: Divide base LR by this factor for fine-tuning
-        seed: Random seed for data sampling
+        exp1_collector: Metrics collector from Experiment 1 (required)
+        epochs_to_extract: Epochs to extract from Experiment 1 (default: [2, 8, 12, 16, 20])
+        seed: Random seed (unused, kept for compatibility)
     
     Returns:
-        Metrics collector with all results
+        Metrics collector with extracted results
     """
     if epochs_to_extract is None:
-        epochs_to_extract = [2, 4, 6, 8, 10]
+        epochs_to_extract = [2, 8, 12, 16, 20]
     
-    if extra_epochs is None:
-        extra_epochs = [12, 15, 18, 20]
-    
-    # Discover all groups
-    root_dir = cfg["dataset"]["args"]["root_dir"]
-    modalities = cfg["dataset"]["args"]["modalities"]
-    all_groups = discover_group_ids(root_dir, modalities)
+    if exp1_collector is None:
+        logger.error("Experiment 1 collector is required for Experiment 2")
+        raise ValueError("exp1_collector must be provided for Experiment 2")
     
     logger.info("=" * 80)
-    logger.info("EXPERIMENT 2: Epoch Sweep")
+    logger.info("EXPERIMENT 2: Epoch Sweep Analysis (Post-processing)")
     logger.info("=" * 80)
-    logger.info(f"Number of LOGO folds: {len(all_groups)}")
-    logger.info(f"Groups (held-out): {all_groups}")
-    logger.info(f"Fixed data proportion: {fixed_proportion * 100:.1f}%")
-    logger.info(f"Epochs to extract from Exp1: {epochs_to_extract}")
-    logger.info(f"Extra epochs to train: {extra_epochs}")
-    logger.info(f"Total epochs: {epochs_to_extract + extra_epochs}")
-    logger.info(f"Seed: {seed}")
+    logger.info(f"Epochs to extract: {epochs_to_extract}")
+    logger.info("This is a post-processing step - no new training will be performed.")
     logger.info("")
     
     # Initialize metrics collector
     collector = OODAdaptationMetricsCollector()
-    collector.metadata["n_folds"] = len(all_groups)
-    collector.metadata["base_model"] = cfg["model"]["name"]
-    collector.metadata["fixed_proportion"] = fixed_proportion
-    collector.metadata["epochs"] = sorted(epochs_to_extract + extra_epochs)
+    collector.metadata["n_folds"] = exp1_collector.metadata.get("n_folds")
+    collector.metadata["base_model"] = exp1_collector.metadata.get("base_model")
+    collector.metadata["epochs"] = epochs_to_extract
+    collector.metadata["experiment_type"] = "epoch_sweep_analysis"
     
-    # Iterate over all folds
-    for fold_idx, held_out_group in enumerate(all_groups):
+    # Extract results from Experiment 1 for all folds and all proportions
+    total_extracted = 0
+    for fold_idx in sorted(exp1_collector.results.keys()):
         logger.info("=" * 80)
-        logger.info(f"FOLD {fold_idx + 1}/{len(all_groups)}: Held-out Group {held_out_group}")
+        logger.info(f"FOLD: Held-out Group {fold_idx}")
         logger.info("=" * 80)
         
-        # Extract results from Experiment 1 if available
-        if exp1_collector is not None:
-            logger.info(f"Extracting results from Experiment 1...")
+        for proportion in sorted(exp1_collector.results[fold_idx].keys()):
+            logger.info(f"  Data proportion: {proportion * 100:.1f}%")
             extracted_count = 0
+            
             for epoch in epochs_to_extract:
-                if (held_out_group in exp1_collector.results and 
-                    fixed_proportion in exp1_collector.results[held_out_group] and 
-                    epoch in exp1_collector.results[held_out_group][fixed_proportion]):
-                    
-                    result = exp1_collector.results[held_out_group][fixed_proportion][epoch]
+                if epoch in exp1_collector.results[fold_idx][proportion]:
+                    result = exp1_collector.results[fold_idx][proportion][epoch]
                     collector.add_result(
-                        fold_idx=held_out_group,
-                        proportion=fixed_proportion,
+                        fold_idx=fold_idx,
+                        proportion=proportion,
                         epoch=epoch,
                         metrics=result["metrics"],
                         train_loss=result.get("train_loss"),
                     )
                     extracted_count += 1
-                    logger.info(f"  Extracted epoch {epoch}")
+                    total_extracted += 1
             
-            logger.info(f"Extracted {extracted_count}/{len(epochs_to_extract)} epochs from Exp1")
-        
-        # Train extra epochs if specified
-        if extra_epochs:
-            # Find and load base checkpoint
-            try:
-                checkpoint_path = find_logo_checkpoint(checkpoint_base_dir, held_out_group)
-                logger.info(f"Loading checkpoint: {checkpoint_path}")
-            except FileNotFoundError as e:
-                logger.error(f"Checkpoint not found: {e}")
-                logger.warning(f"Skipping fold {fold_idx}")
-                continue
-            
-            # Build dataset for held-out group
-            logger.info(f"Building dataset for group {held_out_group}...")
-            full_val_dataset = build_val_dataset(cfg, held_out_group)
-            
-            # Split data
-            n_finetune = int(len(full_val_dataset) * fixed_proportion)
-            n_test = len(full_val_dataset) - n_finetune
-            logger.info(f"Fine-tuning samples: {n_finetune}, Test samples: {n_test}")
-            
-            finetune_dataset, test_dataset = create_finetune_test_split(
-                full_val_dataset,
-                finetune_proportion=fixed_proportion,
-                seed=seed,
-                stratify=True,
-            )
-            
-            # Create data loaders
-            train_loader, val_loader = create_dataloaders(cfg, finetune_dataset, test_dataset)
-            
-            # Load base model
-            model = load_base_model(cfg, checkpoint_path, device)
-            
-            # Create optimizer with reduced LR
-            finetune_cfg = dict(cfg)
-            finetune_lr = cfg["training"]["learning_rate"] / finetune_lr_divisor
-            finetune_cfg["training"]["learning_rate"] = finetune_lr
-            
-            optimizer = build_optimizer(model, finetune_cfg)
-            
-            # Determine how many epochs to train
-            max_epoch = max(extra_epochs)
-            
-            # Create scheduler
-            accum = max(1, cfg["training"].get("accum_steps", 1))
-            total_steps = math.ceil(len(train_loader) / accum) * max_epoch
-            scheduler_cfg = {
-                "warmup_steps": int(cfg["training"].get("warmup_ratio", 0) * total_steps),
-                "max_steps": total_steps,
-                "min_lr": finetune_lr,
-                "type": cfg["training"].get("scheduler", "cosine_decay"),
-            }
-            scheduler = build_scheduler(optimizer, scheduler_cfg)
-            
-            # Create fine-tuner
-            finetuner = FineTuner(
-                cfg=cfg,
-                model=model,
-                train_loader=train_loader,
-                val_loader=val_loader,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                device=device,
-                logger=logger,
-                writer=None,
-                world_size=1,
-            )
-            
-            logger.info(f"Training extra epochs: {extra_epochs}")
-            
-            # Train and evaluate at specified epochs
-            for epoch in range(1, max_epoch + 1):
-                logger.info(f"  Epoch {epoch}/{max_epoch}")
-                
-                # Train
-                train_loss = finetuner.train_epoch(epoch)
-                if train_loss is not None:
-                    logger.info(f"    Train Loss: {train_loss:.4f}")
-                else:
-                    logger.info(f"    Train Loss: None")
-                
-                # Evaluate only at specified epochs
-                if epoch in extra_epochs:
-                    metrics, val_loss = finetuner.validate()
-                    if val_loss is not None:
-                        logger.info(f"    Val Loss: {val_loss:.4f}")
-                    else:
-                        logger.info(f"    Val Loss: None")
-                    
-                    # Log F1 macro for all labels
-                    if metrics:
-                        for split_name in ["individual", "group"]:
-                            if split_name in metrics:
-                                for head_name, head_metrics in metrics[split_name].items():
-                                    if "f1_macro" in head_metrics:
-                                        f1_value = head_metrics["f1_macro"]
-                                        logger.info(f"    {split_name.capitalize()} {head_name} F1 Macro: {f1_value:.4f}")
-                    
-                    # Store results
-                    collector.add_result(
-                        fold_idx=held_out_group,
-                        proportion=fixed_proportion,
-                        epoch=epoch,
-                        metrics=metrics,
-                        train_loss=train_loss,
-                    )
-            
-            # Cleanup
-            del model, optimizer, scheduler, finetuner, train_loader, val_loader
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            logger.info(f"    Extracted {extracted_count}/{len(epochs_to_extract)} epochs")
         
         logger.info("")
+    
+    logger.info(f"Total results extracted: {total_extracted}")
+    logger.info("")
     
     # Export results
     logger.info("=" * 80)
@@ -665,6 +539,198 @@ def run_epoch_sweep(
     )
     
     json_path = os.path.join(output_dir, "exp2_epoch_sweep.json")
+    collector.export_json(json_path)
+    
+    logger.info(f"Per-epoch results: {per_epoch_csv}")
+    logger.info(f"Aggregated results: {agg_csv}")
+    logger.info(f"JSON results: {json_path}")
+    logger.info("")
+    
+    return collector
+
+
+# ----------------------------- Experiment 3: Frozen Backbone with Item Split -----------------------------
+
+def run_frozen_backbone_item_split(
+    cfg: Dict,
+    checkpoint_base_dir: str,
+    output_dir: str,
+    device: torch.device,
+    logger: logging.Logger,
+    partial_finetune_epochs: int = 10,
+    train_ratio: float = 0.8,
+    seed: int = 42,
+) -> OODAdaptationMetricsCollector:
+    """
+    Run Experiment 3: Frozen backbone with item-mode 80/20 split.
+    
+    For each LOGO fold:
+        - Load base model checkpoint
+        - Take complete left-out group
+        - Use item-mode splitting (80/20 train/test)
+        - Freeze backbone, train only classifiers
+        - Fine-tune for specified epochs
+        - Evaluate after each epoch
+    
+    Args:
+        cfg: Configuration dictionary
+        checkpoint_base_dir: Base directory containing LOGO checkpoints
+        output_dir: Directory to save results
+        device: Device to run on
+        logger: Logger instance
+        partial_finetune_epochs: Number of epochs for partial fine-tuning (frozen backbone) (default: 10)
+        train_ratio: Proportion of data for training (default: 0.8)
+        seed: Random seed for data splitting
+    
+    Returns:
+        Metrics collector with all results
+    """
+    from torch.utils.data import random_split
+    
+    # Discover all groups
+    root_dir = cfg["dataset"]["args"]["root_dir"]
+    modalities = cfg["dataset"]["args"]["modalities"]
+    all_groups = discover_group_ids(root_dir, modalities)
+    
+    logger.info("=" * 80)
+    logger.info("EXPERIMENT 3: Frozen Backbone with Item-Mode Split")
+    logger.info("=" * 80)
+    logger.info(f"Number of LOGO folds: {len(all_groups)}")
+    logger.info(f"Groups (held-out): {all_groups}")
+    logger.info(f"Train/test ratio: {train_ratio * 100:.1f}% / {(1-train_ratio) * 100:.1f}%")
+    logger.info(f"Partial fine-tuning epochs: {partial_finetune_epochs}")
+    logger.info(f"Base LR: {cfg['training']['learning_rate']}")
+    logger.info(f"Fine-tuning LR: {cfg['training']['learning_rate']} (same as base)")
+    logger.info(f"Seed: {seed}")
+    logger.info("")
+    
+    # Initialize metrics collector
+    collector = OODAdaptationMetricsCollector()
+    collector.metadata["n_folds"] = len(all_groups)
+    collector.metadata["base_model"] = cfg["model"]["name"]
+    collector.metadata["train_ratio"] = train_ratio
+    collector.metadata["partial_finetune_epochs"] = partial_finetune_epochs
+    collector.metadata["experiment_type"] = "frozen_backbone_item_split"
+    
+    # Iterate over all folds
+    for fold_idx, held_out_group in enumerate(all_groups):
+        logger.info("=" * 80)
+        logger.info(f"FOLD {fold_idx + 1}/{len(all_groups)}: Held-out Group {held_out_group}")
+        logger.info("=" * 80)
+        
+        # Find and load base checkpoint
+        try:
+            checkpoint_path = find_logo_checkpoint(checkpoint_base_dir, held_out_group)
+            logger.info(f"Loading checkpoint: {checkpoint_path}")
+        except FileNotFoundError as e:
+            logger.error(f"Checkpoint not found: {e}")
+            logger.warning(f"Skipping fold {fold_idx}")
+            continue
+        
+        # Build dataset for held-out group
+        logger.info(f"Building dataset for group {held_out_group}...")
+        full_val_dataset = build_val_dataset(cfg, held_out_group)
+        logger.info(f"Total samples in held-out group: {len(full_val_dataset)}")
+        
+        # Split data using item-mode (80/20)
+        n_total = len(full_val_dataset)
+        n_train = int(round(n_total * train_ratio))
+        n_test = n_total - n_train
+        logger.info(f"Train samples: {n_train}, Test samples: {n_test}")
+        
+        g = torch.Generator().manual_seed(seed)
+        train_subset, test_subset = random_split(full_val_dataset, [n_train, n_test], generator=g)
+        
+        # Create data loaders
+        train_loader, val_loader = create_dataloaders(cfg, train_subset, test_subset)
+        
+        # Load base model
+        model = load_base_model(cfg, checkpoint_path, device)
+        
+        # Create optimizer with base LR (same as base training)
+        base_lr = cfg["training"]["learning_rate"]
+        optimizer = build_optimizer(model, cfg)
+        
+        # Create scheduler (warmup only, then constant LR)
+        accum = max(1, cfg["training"].get("accum_steps", 1))
+        total_steps = math.ceil(len(train_loader) / accum) * partial_finetune_epochs
+        warmup_steps = int(cfg["training"].get("warmup_ratio", 0) * total_steps)
+        scheduler_cfg = {
+            "warmup_steps": warmup_steps,
+            "max_steps": total_steps,
+            "type": "warmup_constant",
+        }
+        scheduler = build_scheduler(optimizer, scheduler_cfg)
+        
+        # Create fine-tuner (freeze backbone, train only classifiers)
+        finetuner = FineTuner(
+            cfg=cfg,
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            device=device,
+            logger=logger,
+            writer=None,
+            world_size=1,
+            freeze_backbone=True,  # Freeze backbone
+        )
+        
+        # Fine-tune for specified epochs
+        for epoch in range(1, partial_finetune_epochs + 1):
+            logger.info(f"  Epoch {epoch}/{partial_finetune_epochs}")
+            
+            # Train
+            train_loss = finetuner.train_epoch(epoch)
+            if train_loss is not None:
+                logger.info(f"    Train Loss: {train_loss:.4f}")
+            else:
+                logger.info(f"    Train Loss: None")
+            
+            # Validate
+            metrics, val_loss = finetuner.validate()
+            if val_loss is not None:
+                logger.info(f"    Val Loss: {val_loss:.4f}")
+            else:
+                logger.info(f"    Val Loss: None")
+            
+            # Log F1 macro for all labels
+            if metrics:
+                for split_name in ["individual", "group"]:
+                    if split_name in metrics:
+                        for head_name, head_metrics in metrics[split_name].items():
+                            if "f1_macro" in head_metrics:
+                                f1_value = head_metrics["f1_macro"]
+                                logger.info(f"    {split_name.capitalize()} {head_name} F1 Macro: {f1_value:.4f}")
+            
+            # Store results
+            collector.add_result(
+                fold_idx=held_out_group,
+                proportion=train_ratio,  # Use train_ratio as proportion identifier
+                epoch=epoch,
+                metrics=metrics,
+                train_loss=train_loss,
+            )
+        
+        # Cleanup
+        del model, optimizer, scheduler, finetuner, train_loader, val_loader
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        logger.info("")
+    
+    # Export results
+    logger.info("=" * 80)
+    logger.info("Exporting Experiment 3 Results...")
+    logger.info("=" * 80)
+    
+    per_epoch_csv, agg_csv = collector.export_csv(
+        output_dir,
+        filename_prefix="exp3_frozen_backbone_item_split"
+    )
+    
+    json_path = os.path.join(output_dir, "exp3_frozen_backbone_item_split.json")
     collector.export_json(json_path)
     
     logger.info(f"Per-epoch results: {per_epoch_csv}")
@@ -707,7 +773,12 @@ def main():
     parser.add_argument(
         "--exp2-only",
         action="store_true",
-        help="Run only Experiment 2 (epoch sweep)"
+        help="Run only Experiment 2 (epoch sweep analysis)"
+    )
+    parser.add_argument(
+        "--exp3-only",
+        action="store_true",
+        help="Run only Experiment 3 (frozen backbone with item split)"
     )
     parser.add_argument(
         "--data-proportions",
@@ -717,36 +788,35 @@ def main():
         help="Data proportions for Experiment 1"
     )
     parser.add_argument(
-        "--finetune-epochs",
+        "--full-finetune-epochs",
         type=int,
-        default=10,
-        help="Number of fine-tuning epochs for Experiment 1"
-    )
-    parser.add_argument(
-        "--fixed-proportion",
-        type=float,
-        default=0.10,
-        help="Fixed data proportion for Experiment 2"
+        default=20,
+        help="Number of epochs for full fine-tuning (all layers) in Experiment 1 (default: 20)"
     )
     parser.add_argument(
         "--epochs-to-extract",
         type=int,
         nargs="+",
-        default=[2, 4, 6, 8, 10],
+        default=[2, 8, 12, 16, 20],
         help="Epochs to extract from Exp1 for Exp2"
     )
     parser.add_argument(
-        "--extra-epochs",
+        "--partial-finetune-epochs",
         type=int,
-        nargs="+",
-        default=[12, 15, 18, 20],
-        help="Extra epochs to train for Exp2"
+        default=10,
+        help="Number of epochs for partial fine-tuning (frozen backbone) in Experiment 3 (default: 10)"
+    )
+    parser.add_argument(
+        "--exp3-train-ratio",
+        type=float,
+        default=0.8,
+        help="Train ratio for Experiment 3 item-mode split (default: 0.8)"
     )
     parser.add_argument(
         "--lr-divisor",
         type=int,
-        default=3,
-        help="Divide base LR by this factor for fine-tuning"
+        default=5,
+        help="Divide base LR by this factor for fine-tuning (default: 5 for Exp1, unused for Exp3)"
     )
     parser.add_argument(
         "--seed",
@@ -788,9 +858,11 @@ def main():
     # Run experiments
     exp1_collector = None
     exp2_collector = None
+    exp3_collector = None
     
-    run_exp1 = not args.exp2_only
-    run_exp2 = not args.exp1_only
+    run_exp1 = not (args.exp2_only or args.exp3_only)
+    run_exp2 = not (args.exp1_only or args.exp3_only)
+    run_exp3 = not (args.exp1_only or args.exp2_only)
     
     if run_exp1:
         exp1_collector = run_data_portion_sweep(
@@ -800,7 +872,7 @@ def main():
             device=device,
             logger=logger,
             data_proportions=args.data_proportions,
-            finetune_epochs=args.finetune_epochs,
+            full_finetune_epochs=args.full_finetune_epochs,
             finetune_lr_divisor=args.lr_divisor,
             seed=args.seed,
         )
@@ -813,10 +885,19 @@ def main():
             device=device,
             logger=logger,
             exp1_collector=exp1_collector,
-            fixed_proportion=args.fixed_proportion,
             epochs_to_extract=args.epochs_to_extract,
-            extra_epochs=args.extra_epochs,
-            finetune_lr_divisor=args.lr_divisor,
+            seed=args.seed,
+        )
+    
+    if run_exp3:
+        exp3_collector = run_frozen_backbone_item_split(
+            cfg=cfg,
+            checkpoint_base_dir=args.checkpoint_dir,
+            output_dir=args.output_dir,
+            device=device,
+            logger=logger,
+            partial_finetune_epochs=args.partial_finetune_epochs,
+            train_ratio=args.exp3_train_ratio,
             seed=args.seed,
         )
     

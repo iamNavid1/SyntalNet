@@ -25,7 +25,22 @@ class WarmupCosineLR(_LRScheduler):
         ]
 
 
-def build_scheduler(optimizer: Optimizer, config: Any) -> WarmupCosineLR:
+class WarmupConstantLR(_LRScheduler):
+    """Scheduler that does warmup then keeps LR constant."""
+    def __init__(self, optimizer: Optimizer, warmup_steps: int, max_steps: int, last_epoch: int = -1):
+        self.warmup_steps = warmup_steps
+        self.max_steps = max_steps
+        super().__init__(optimizer, last_epoch)
+
+    def get_lr(self):
+        step = self.last_epoch + 1
+        if step <= self.warmup_steps and self.warmup_steps > 0:
+            return [base_lr * step / self.warmup_steps for base_lr in self.base_lrs]
+        # After warmup, keep LR constant at base_lr
+        return self.base_lrs
+
+
+def build_scheduler(optimizer: Optimizer, config: Any):
     sched_type = config.get("type", "warmup_cosine")
 
     if sched_type == "cosine_decay":
@@ -33,6 +48,11 @@ def build_scheduler(optimizer: Optimizer, config: Any) -> WarmupCosineLR:
         max_steps = int(config.get("max_steps"))
         min_lr = float(config.get("min_lr", 0.0))
         return WarmupCosineLR(optimizer, warmup, max_steps, min_lr=min_lr)
+
+    if sched_type == "warmup_constant":
+        warmup = int(config.get("warmup_steps", 0))
+        max_steps = int(config.get("max_steps"))
+        return WarmupConstantLR(optimizer, warmup, max_steps)
 
     if sched_type == "one_cycle":
         max_steps = int(config.get("max_steps"))

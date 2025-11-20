@@ -33,6 +33,7 @@ class FineTuner:
         logger,
         writer=None,
         world_size: int = 1,
+        freeze_backbone: bool = True,
     ):
         self.cfg = cfg
         self.model = model
@@ -73,8 +74,29 @@ class FineTuner:
         
         self.validator = Validator(self.device, self.autocast_kwargs, self.grp_as_ind)
         
-        # Freeze encoder/backbone
-        self._freeze_encoder()
+        # Freeze or unfreeze encoder/backbone based on configuration
+        self.freeze_backbone = freeze_backbone
+        if freeze_backbone:
+            self._freeze_encoder()
+        else:
+            self._unfreeze_all()
+    
+    def _unfreeze_all(self):
+        """Unfreeze all parameters (encoder/backbone + classifier)."""
+        model_ref = getattr(self.model, "module", self.model)
+        
+        # Unfreeze all parameters
+        for param in model_ref.parameters():
+            param.requires_grad = True
+        
+        # Log parameter counts
+        if self.logger:
+            total_params = sum(p.numel() for p in model_ref.parameters())
+            trainable_params = sum(p.numel() for p in model_ref.parameters() if p.requires_grad)
+            
+            self.logger.info(f"Total parameters: {total_params:,}")
+            self.logger.info(f"Trainable parameters: {trainable_params:,} ({100*trainable_params/total_params:.2f}%)")
+            self.logger.info("All layers unfrozen (encoder + classifier)")
     
     def _freeze_encoder(self):
         """Freeze all parameters except classifiers."""
