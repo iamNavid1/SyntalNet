@@ -141,6 +141,19 @@ class GroupDynamicsDataset(Dataset):
                 self._json_cache[path] = json.load(f)
         return self._json_cache[path]
 
+    def _close_memmap(self, arr: np.ndarray):
+        mmap_obj = getattr(arr, '_mmap', None)
+        if mmap_obj is not None:
+            try:
+                mmap_obj.close()
+            except ValueError:
+                pass
+
+    def _clear_npy_cache(self):
+        while self._npy_cache:
+            _, arr = self._npy_cache.popitem(last=False)
+            self._close_memmap(arr)
+
     def _load_npy(self, path: str) -> np.ndarray:
         # memmap so OS shares pages across workers
         if path in self._npy_cache:
@@ -148,7 +161,8 @@ class GroupDynamicsDataset(Dataset):
         else:
             self._npy_cache[path] = np.load(path, mmap_mode='r')
             if len(self._npy_cache) > self._npy_cache_cap:
-                self._npy_cache.popitem(last=False)
+                _, evicted = self._npy_cache.popitem(last=False)
+                self._close_memmap(evicted)
         return self._npy_cache[path]
 
     # ---------- higher-level prep ----------
@@ -472,3 +486,17 @@ class GroupDynamicsDataset(Dataset):
             modality_data = self.transforms(modality_data)
 
         return modality_data, modality_mask, labels, gid
+
+    def close(self):
+        """Release file-backed caches to free file descriptors."""
+        self._clear_npy_cache()
+        self._audio_merge_cache.clear()
+        self._prosody_clip_cache.clear()
+        self._csv_cache.clear()
+        self._json_cache.clear()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass

@@ -137,6 +137,18 @@ def build_val_dataset(
     
     # Include only the held-out group
     args["include_groups"] = [held_out_group]
+
+    # Constrain file-backed cache size to avoid exhausting OS file descriptors.
+    workers_cfg = cfg["training"].get("num_workers", 4)
+    try:
+        num_workers = int(workers_cfg)
+    except (TypeError, ValueError):
+        num_workers = 0
+    num_workers = max(1, num_workers)
+    desired_cap = int(args.get("npy_cache_cap", 256))
+    max_fd_budget = int(cfg["training"].get("max_fd_budget", 512))
+    safe_cap = max(16, min(desired_cap, max_fd_budget // (num_workers + 1)))
+    args["npy_cache_cap"] = safe_cap
     
     return GroupDynamicsDataset(**args)
 
@@ -423,6 +435,8 @@ def run_data_portion_sweep(
                 gc.collect()
         
         logger.info("")
+        if hasattr(full_val_dataset, "close"):
+            full_val_dataset.close()
         del full_val_dataset
         gc.collect()
     
@@ -719,9 +733,13 @@ def run_frozen_backbone_item_split(
             )
         
         # Cleanup
-        del model, optimizer, scheduler, finetuner, train_loader, val_loader
+        del model, optimizer, scheduler, finetuner, train_loader, val_loader, train_subset, test_subset
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        if hasattr(full_val_dataset, "close"):
+            full_val_dataset.close()
+        del full_val_dataset
+        gc.collect()
         
         logger.info("")
     
