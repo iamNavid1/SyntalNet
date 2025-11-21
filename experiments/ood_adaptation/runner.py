@@ -8,6 +8,7 @@ import re
 import math
 import logging
 import argparse
+import gc
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -321,9 +322,10 @@ def run_data_portion_sweep(
                                     logger.info(f"  {split_name.capitalize()} {head_name} F1 Macro: {f1_value:.4f}")
                 
                 # Cleanup
-                del base_model, test_loader
+                del base_model, test_loader, test_dataset
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+                gc.collect()
                 
             else:
                 # Fine-tuning with data proportion
@@ -415,11 +417,14 @@ def run_data_portion_sweep(
                     )
                 
                 # Cleanup
-                del model, optimizer, scheduler, finetuner, train_loader, val_loader
+                del model, optimizer, scheduler, finetuner, train_loader, val_loader, finetune_dataset, test_dataset
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+                gc.collect()
         
         logger.info("")
+        del full_val_dataset
+        gc.collect()
     
     # Export results
     logger.info("=" * 80)
