@@ -138,12 +138,11 @@ def find_checkpoint_path(
         Path to checkpoint file, or None if not found
     
     Checkpoint search order:
-    1. For item/group: {checkpoint_dir}/{variant_name}/best.pth
-    2. For kfold: {checkpoint_dir}/{variant_name}/kfold/fold_{fold_idx:02d}/best.pth
-    3. For logo: {checkpoint_dir}/{variant_name}/logo/fold_{held_out_group:02d}/best.pth
+    1. For item/group: {checkpoint_dir}/best.pth
+    2. For kfold: {checkpoint_dir}/kfold/fold_{fold_idx:02d}/best.pth
+    3. For logo: {checkpoint_dir}/logo/fold_{held_out_group:02d}/best.pth
     4. Falls back to: latest.pth, epoch_100.pth, checkpoint.pth
     """
-    variant_dir = os.path.join(checkpoint_dir, variant_name)
     checkpoint_names = ["best.pth", "latest.pth", "epoch_100.pth", "checkpoint.pth"]
     
     # For k-fold, checkpoints are in fold-specific subdirectories
@@ -153,7 +152,7 @@ def find_checkpoint_path(
         
         # Try kfold/fold_XX structure (standard from training)
         fold_tag = f"fold_{fold_idx:02d}"
-        fold_dir = os.path.join(variant_dir, "kfold", fold_tag)
+        fold_dir = os.path.join(checkpoint_dir, "kfold", fold_tag)
         
         for ckpt_name in checkpoint_names:
             ckpt_path = os.path.join(fold_dir, ckpt_name)
@@ -161,7 +160,7 @@ def find_checkpoint_path(
                 return ckpt_path
         
         # Alternative: try direct fold_XX in variant directory
-        fold_dir_alt = os.path.join(variant_dir, fold_tag)
+        fold_dir_alt = os.path.join(checkpoint_dir, fold_tag)
         for ckpt_name in checkpoint_names:
             ckpt_path = os.path.join(fold_dir_alt, ckpt_name)
             if os.path.exists(ckpt_path):
@@ -170,7 +169,7 @@ def find_checkpoint_path(
         # Alternative: try fold-specific checkpoint names in variant directory
         for ckpt_name in checkpoint_names:
             base_name = os.path.splitext(ckpt_name)[0]
-            ckpt_path = os.path.join(variant_dir, f"{base_name}_fold_{fold_idx:02d}.pth")
+            ckpt_path = os.path.join(checkpoint_dir, f"{base_name}_fold_{fold_idx:02d}.pth")
             if os.path.exists(ckpt_path):
                 return ckpt_path
         
@@ -180,7 +179,7 @@ def find_checkpoint_path(
     elif split_mode == "logo":
         # Try logo/fold_XX structure (standard from training)
         fold_tag = f"fold_{fold_idx:02d}"
-        fold_dir = os.path.join(variant_dir, "logo", fold_tag)
+        fold_dir = os.path.join(checkpoint_dir, "logo", fold_tag)
         
         for ckpt_name in checkpoint_names:
             ckpt_path = os.path.join(fold_dir, ckpt_name)
@@ -190,14 +189,14 @@ def find_checkpoint_path(
         # If held_out_group is provided, use it
         if held_out_group is not None:
             fold_tag = f"fold_{held_out_group:02d}"
-            fold_dir = os.path.join(variant_dir, "logo", fold_tag)
+            fold_dir = os.path.join(checkpoint_dir, "logo", fold_tag)
             for ckpt_name in checkpoint_names:
                 ckpt_path = os.path.join(fold_dir, ckpt_name)
                 if os.path.exists(ckpt_path):
                     return ckpt_path
         
         # Try to discover available logo folds
-        logo_dir = os.path.join(variant_dir, "logo")
+        logo_dir = os.path.join(checkpoint_dir, "logo")
         if os.path.exists(logo_dir):
             # Get all fold directories, sorted
             fold_dirs = sorted([d for d in os.listdir(logo_dir) if d.startswith("fold_")])
@@ -213,7 +212,13 @@ def find_checkpoint_path(
     else:
         # For item, group: single checkpoint per variant
         for ckpt_name in checkpoint_names:
-            ckpt_path = os.path.join(variant_dir, ckpt_name)
+            ckpt_path = os.path.join(checkpoint_dir, ckpt_name)
+            if os.path.exists(ckpt_path):
+                return ckpt_path
+        
+        # Fallback to variant directory
+        for ckpt_name in checkpoint_names:
+            ckpt_path = os.path.join(checkpoint_dir, variant_name, ckpt_name)
             if os.path.exists(ckpt_path):
                 return ckpt_path
         

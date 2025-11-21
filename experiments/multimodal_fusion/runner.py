@@ -310,9 +310,9 @@ def run_stress_test(
                 if checkpoint_path is None:
                     logger.warning(f"Checkpoint not found for variant {variant_name}, fold {fold_idx}")
                     if split_mode == "kfold":
-                        logger.warning(f"  Searched in: {os.path.join(checkpoint_dir, variant_name, 'kfold', f'fold_{fold_idx:02d}')}")
+                        logger.warning(f"  Searched in: {os.path.join(checkpoint_dir, 'kfold', f'fold_{fold_idx:02d}')}")
                     elif split_mode == "logo":
-                        search_path = os.path.join(checkpoint_dir, variant_name, "logo", f"fold_{held_out_group:02d}") if held_out_group else os.path.join(checkpoint_dir, variant_name, "logo")
+                        search_path = os.path.join(checkpoint_dir, "logo", f"fold_{held_out_group:02d}") if held_out_group else os.path.join(checkpoint_dir, "logo")
                         logger.warning(f"  Searched in: {search_path}")
                     logger.warning(f"Skipping fold {fold_idx + 1} for variant {variant_name}")
                     continue
