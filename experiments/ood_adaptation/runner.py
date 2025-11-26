@@ -9,9 +9,11 @@ import math
 import logging
 import argparse
 import gc
+import random
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -80,6 +82,26 @@ def discover_group_ids(root_dir: str, modalities: List[str]) -> List[int]:
     
     return sorted(group_ids)
 
+
+# ----------------------------- Reproducibility -----------------------------
+
+def set_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def _worker_init_fn(worker_id: int):
+    base_seed = torch.initial_seed() % 2**32
+    np.random.seed(base_seed + worker_id)
+    random.seed(base_seed + worker_id)
+
+
+# ----------------------------- Checkpoint helpers -----------------------------
 
 def find_logo_checkpoint(checkpoint_base_dir: str, fold_idx: int) -> str:
     """Find checkpoint for a specific LOGO fold."""
@@ -178,7 +200,8 @@ def create_dataloaders(
         pin_memory_device=pin_memory_device,
         persistent_workers=(num_workers > 0),
         collate_fn=collate_fn,
-        generator=torch.Generator().manual_seed(42),
+        worker_init_fn=_worker_init_fn,
+        generator=torch.Generator().manual_seed(0),
     )
     
     val_batch_size = cfg["training"].get("val_batch_size", batch_size)
@@ -192,7 +215,8 @@ def create_dataloaders(
         pin_memory_device=pin_memory_device,
         persistent_workers=(num_workers > 0),
         collate_fn=collate_fn,
-        generator=torch.Generator().manual_seed(43),
+        worker_init_fn=_worker_init_fn,
+        generator=torch.Generator().manual_seed(1),
     )
     
     return train_loader, val_loader
@@ -875,6 +899,9 @@ def main():
     
     # Load config
     cfg = build.config(args.config)
+    
+    training_seed = int(cfg.get("training", {}).get("seed", 42))
+    set_seed(training_seed)
     
     # Override proto_warmup_epochs to 0 for fine-tuning experiments
     if "model" in cfg and "args" in cfg["model"]:

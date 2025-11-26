@@ -6,7 +6,10 @@ import time
 import logging
 import gc
 import yaml
+import random
 from pathlib import Path
+
+import numpy as np
 import torch
 
 project_root = Path(__file__).resolve().parent.parent.parent
@@ -38,6 +41,16 @@ ALLOCATION_NOISE_LEVELS = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
 
 # Model variants to evaluate
 MODEL_VARIANTS = ["glrx", "uniform_avg", "gated_sum", "pairwise", "concat_mlp"]
+
+
+def set_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def setup_logging(output_dir: str) -> logging.Logger:
@@ -219,6 +232,9 @@ def run_stress_test(
     # Use first config for dataset building (assuming all configs have same dataset settings)
     first_config_path, _, _ = config_info[0]
     cfg = build.config(first_config_path)
+
+    training_seed = int(cfg.get("training", {}).get("seed", 42))
+    set_seed(training_seed)
     
     # Build datasets (once for all variants) based on config split mode
     split_cfg = cfg.get("dataset", {}).get("split", {})
