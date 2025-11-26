@@ -4,7 +4,7 @@ import math
 from typing import Any
 
 from torch.optim import Optimizer
-from torch.optim.lr_scheduler import _LRScheduler, OneCycleLR
+from torch.optim.lr_scheduler import _LRScheduler, OneCycleLR, ReduceLROnPlateau
 
 
 class WarmupCosineLR(_LRScheduler):
@@ -12,7 +12,7 @@ class WarmupCosineLR(_LRScheduler):
         self.warmup_steps = warmup_steps
         self.max_steps = max_steps
         self.min_lr = min_lr
-        super().__init__(optimizer, last_epoch)
+        super().__init__()
 
     def get_lr(self):
         step = self.last_epoch + 1
@@ -30,7 +30,7 @@ class WarmupConstantLR(_LRScheduler):
     def __init__(self, optimizer: Optimizer, warmup_steps: int, max_steps: int, last_epoch: int = -1):
         self.warmup_steps = warmup_steps
         self.max_steps = max_steps
-        super().__init__(optimizer, last_epoch)
+        super().__init__()
 
     def get_lr(self):
         step = self.last_epoch + 1
@@ -69,6 +69,23 @@ def build_scheduler(optimizer: Optimizer, config: Any):
             anneal_strategy=anneal,
             div_factor=div_factor,
             final_div_factor=final_div_factor,
+        )
+
+    if sched_type == "reduce_on_plateau":
+        factor = float(config.get("factor", 0.5))
+        patience = int(config.get("patience", 3))
+        threshold = float(config.get("threshold", 0.1))
+        mode = config.get("mode", "min")
+        threshold_mode = config.get("threshold_mode", "rel")
+        min_lr = float(config.get("min_lr", 1e-7))
+        return ReduceLROnPlateau(
+            optimizer,
+            mode=mode,
+            factor=factor,
+            patience=patience,
+            threshold=threshold,
+            threshold_mode=threshold_mode,
+            min_lr=min_lr,
         )
 
     raise ValueError(f"Unknown scheduler type: {sched_type}")

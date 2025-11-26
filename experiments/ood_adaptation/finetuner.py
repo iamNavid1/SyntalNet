@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.amp import GradScaler, autocast
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from engine.validator import Validator
 from engine.utils import BuildAutocastKWargs, modalities_to_branches
@@ -18,7 +19,7 @@ from utils.losses import ClassBalancedFocalLoss, ClassBalancedCELoss
 
 class FineTuner:
     """
-    Fine-tuning trainer that freezes the encoder and only trains classifiers.
+    Fine-tuning trainer that optionally freezes the encoder.
     """
     
     def __init__(
@@ -310,6 +311,10 @@ class FineTuner:
         self.scaler.step(self.optimizer)
         self.scaler.update()
         self.optimizer.zero_grad(set_to_none=True)
-        if self.scheduler is not None:
+        if self.scheduler is not None and not isinstance(self.scheduler, ReduceLROnPlateau):
             self.scheduler.step()
+
+    def step_scheduler_on_epoch(self, metric: float):
+        if self.scheduler is not None and isinstance(self.scheduler, ReduceLROnPlateau):
+            self.scheduler.step(metric)
 

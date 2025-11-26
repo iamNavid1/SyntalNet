@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import os
 import json
+import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional, Any
 from collections import defaultdict
+
+try:
+    import torch
+except ImportError:  # pragma: no cover - torch is available in training env
+    torch = None
 
 
 class OODAdaptationMetricsCollector:
@@ -174,9 +180,17 @@ class OODAdaptationMetricsCollector:
         # Convert defaultdicts to regular dicts for JSON serialization
         def convert_to_dict(obj):
             if isinstance(obj, defaultdict):
+                obj = dict(obj)
+            if isinstance(obj, dict):
                 return {k: convert_to_dict(v) for k, v in obj.items()}
-            elif isinstance(obj, dict):
-                return {k: convert_to_dict(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [convert_to_dict(v) for v in obj]
+            if torch is not None and isinstance(obj, torch.Tensor):
+                return convert_to_dict(obj.cpu().numpy())
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            if isinstance(obj, np.generic):
+                return obj.item()
             return obj
         
         output_data = {

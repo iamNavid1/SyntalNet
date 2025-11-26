@@ -208,7 +208,7 @@ def run_data_portion_sweep(
     logger: logging.Logger,
     data_proportions: List[float] = None,
     full_finetune_epochs: int = 20,
-    finetune_lr_divisor: int = 5,
+    finetune_lr_divisor: float = 1.0,
     seed: int = 42,
 ) -> OODAdaptationMetricsCollector:
     """
@@ -230,7 +230,7 @@ def run_data_portion_sweep(
         logger: Logger instance
         data_proportions: List of proportions to sweep (default: [0, 0.05, 0.10, 0.15, 0.20, 0.25])
         full_finetune_epochs: Number of epochs for full fine-tuning (all layers) (default: 20)
-        finetune_lr_divisor: Divide base LR by this factor for fine-tuning (default: 5)
+        finetune_lr_divisor: Divide base LR by this factor for fine-tuning (default: 1.0)
         seed: Random seed for data sampling
     
     Returns:
@@ -366,14 +366,14 @@ def run_data_portion_sweep(
                 
                 optimizer = build_optimizer(model, finetune_cfg)
                 
-                # Create scheduler (warmup only, then constant LR)
-                accum = max(1, cfg["training"].get("accum_steps", 1))
-                total_steps = math.ceil(len(train_loader) / accum) * full_finetune_epochs
-                warmup_steps = int(cfg["training"].get("warmup_ratio", 0) * total_steps)
+                # Create scheduler (ReduceLROnPlateau on training loss)
                 scheduler_cfg = {
-                    "warmup_steps": warmup_steps,
-                    "max_steps": total_steps,
-                    "type": "warmup_constant",
+                    "type": "reduce_on_plateau",
+                    "factor": 0.5,
+                    "patience": 3,
+                    "threshold": 0.1,
+                    "mode": "min",
+                    "threshold_mode": "rel",
                 }
                 scheduler = build_scheduler(optimizer, scheduler_cfg)
                 
@@ -400,6 +400,7 @@ def run_data_portion_sweep(
                     train_loss = finetuner.train_epoch(epoch)
                     if train_loss is not None:
                         logger.info(f"    Train Loss: {train_loss:.4f}")
+                        finetuner.step_scheduler_on_epoch(train_loss)
                     else:
                         logger.info(f"    Train Loss: None")
                     
@@ -578,6 +579,7 @@ def run_frozen_backbone_item_split(
     logger: logging.Logger,
     partial_finetune_epochs: int = 10,
     train_ratio: float = 0.8,
+    finetune_lr_multiplier: float = 1.0,
     seed: int = 42,
 ) -> OODAdaptationMetricsCollector:
     """
@@ -599,6 +601,7 @@ def run_frozen_backbone_item_split(
         logger: Logger instance
         partial_finetune_epochs: Number of epochs for partial fine-tuning (frozen backbone) (default: 10)
         train_ratio: Proportion of data for training (default: 0.8)
+        finetune_lr_multiplier: Multiply base LR by this factor for fine-tuning (default: 1.0)
         seed: Random seed for data splitting
     
     Returns:
@@ -619,7 +622,7 @@ def run_frozen_backbone_item_split(
     logger.info(f"Train/test ratio: {train_ratio * 100:.1f}% / {(1-train_ratio) * 100:.1f}%")
     logger.info(f"Partial fine-tuning epochs: {partial_finetune_epochs}")
     logger.info(f"Base LR: {cfg['training']['learning_rate']}")
-    logger.info(f"Fine-tuning LR: {cfg['training']['learning_rate']} (same as base)")
+    logger.info(f"Fine-tuning LR: {cfg['training']['learning_rate'] * finetune_lr_multiplier}")
     logger.info(f"Seed: {seed}")
     logger.info("")
     
@@ -666,18 +669,21 @@ def run_frozen_backbone_item_split(
         # Load base model
         model = load_base_model(cfg, checkpoint_path, device)
         
-        # Create optimizer with base LR (same as base training)
-        base_lr = cfg["training"]["learning_rate"]
-        optimizer = build_optimizer(model, cfg)
+        # Create optimizer with fine-tuning LR
+        finetune_cfg = dict(cfg)
+        finetune_lr = cfg["training"]["learning_rate"] * finetune_lr_multiplier
+        finetune_cfg["training"]["learning_rate"] = finetune_lr
         
-        # Create scheduler (warmup only, then constant LR)
-        accum = max(1, cfg["training"].get("accum_steps", 1))
-        total_steps = math.ceil(len(train_loader) / accum) * partial_finetune_epochs
-        warmup_steps = int(cfg["training"].get("warmup_ratio", 0) * total_steps)
+        optimizer = build_optimizer(model, finetune_cfg)
+        
+        # Create scheduler (ReduceLROnPlateau on training loss)
         scheduler_cfg = {
-            "warmup_steps": warmup_steps,
-            "max_steps": total_steps,
-            "type": "warmup_constant",
+            "type": "reduce_on_plateau",
+            "factor": 0.5,
+            "patience": 3,
+            "threshold": 0.1,
+            "mode": "min",
+            "threshold_mode": "rel",
         }
         scheduler = build_scheduler(optimizer, scheduler_cfg)
         
@@ -704,6 +710,7 @@ def run_frozen_backbone_item_split(
             train_loss = finetuner.train_epoch(epoch)
             if train_loss is not None:
                 logger.info(f"    Train Loss: {train_loss:.4f}")
+                finetuner.step_scheduler_on_epoch(train_loss)
             else:
                 logger.info(f"    Train Loss: None")
             
@@ -826,8 +833,8 @@ def main():
     parser.add_argument(
         "--partial-finetune-epochs",
         type=int,
-        default=10,
-        help="Number of epochs for partial fine-tuning (frozen backbone) in Experiment 3 (default: 10)"
+        default=30,
+        help="Number of epochs for partial fine-tuning (frozen backbone) in Experiment 3 (default: 30)"
     )
     parser.add_argument(
         "--exp3-train-ratio",
@@ -840,6 +847,12 @@ def main():
         type=int,
         default=1,
         help="Divide base LR by this factor for fine-tuning (default: 1 for Exp1, unused for Exp3)"
+    )
+    parser.add_argument(
+        "--lr-multiplier",
+        type=float,
+        default=1.0,
+        help="Multiply base LR by this factor for fine-tuning (default: 1.0 for Exp3, unused for Exp1)"
     )
     parser.add_argument(
         "--seed",
@@ -870,12 +883,12 @@ def main():
         if original_warmup != 0:
             logger.info(f"Overriding proto_warmup_epochs from {original_warmup} to 0 for fine-tuning")
     
-    # Override warmup_ratio to 0.05 for fine-tuning experiments
+    # Override warmup_ratio to 0.05 for fine-tuning experiment 1
     if "training" in cfg:
         original_warmup_ratio = cfg["training"].get("warmup_ratio", 0.1)
         cfg["training"]["warmup_ratio"] = 0.05
         if original_warmup_ratio != 0.05:
-            logger.info(f"Overriding warmup_ratio from {original_warmup_ratio} to 0.05 for fine-tuning")
+            logger.info(f"Overriding warmup_ratio from {original_warmup_ratio} to 0.05 for fine-tuning experiment 1")
     
     # Device
     if args.device:
@@ -926,6 +939,13 @@ def main():
             seed=args.seed,
         )
     
+    # Override warmup_ratio to 0.0 for fine-tuning experiment 3
+    if "training" in cfg:
+        original_warmup_ratio = cfg["training"].get("warmup_ratio", 0.1)
+        cfg["training"]["warmup_ratio"] = 0.0
+        if original_warmup_ratio != 0.0:
+            logger.info(f"Overriding warmup_ratio from {original_warmup_ratio} to 0.0 for fine-tuning experiment 3")
+
     if run_exp3:
         exp3_collector = run_frozen_backbone_item_split(
             cfg=cfg,
@@ -935,6 +955,7 @@ def main():
             logger=logger,
             partial_finetune_epochs=args.partial_finetune_epochs,
             train_ratio=args.exp3_train_ratio,
+            finetune_lr_multiplier=args.lr_multiplier,
             seed=args.seed,
         )
     
