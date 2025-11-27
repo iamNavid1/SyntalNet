@@ -50,12 +50,13 @@ class Validator:
             batch_data = modalities_to_branches(batch_data)
             batch_labels = {k: v.to(self.device) for k, v in batch_labels.items()}
 
+            ind_label, grp_label = self._prepare_label_views(batch_labels, self.grp_as_ind)
+            batch_labels["individual"] = ind_label
+            batch_labels["group"] = grp_label
+
             with autocast(**self.autocast_kwargs):
                 _, logits = model(batch_data)
                 if loss_fn is not None:
-                    ind_label, grp_label = self._prepare_label_views(batch_labels, self.grp_as_ind)
-                    batch_labels["individual"] = ind_label
-                    batch_labels["group"] = grp_label
                     loss = loss_fn(logits, ind_label, grp_label)
                     if self.grp_as_ind:
                         batch_size = batch_labels.get("individual").shape[0]

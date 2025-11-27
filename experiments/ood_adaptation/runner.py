@@ -394,8 +394,8 @@ def run_data_portion_sweep(
                 scheduler_cfg = {
                     "type": "reduce_on_plateau",
                     "factor": 0.5,
-                    "patience": 3,
-                    "threshold": 0.1,
+                    "patience": 5,
+                    "threshold": 0.015,
                     "mode": "min",
                     "threshold_mode": "rel",
                 }
@@ -704,8 +704,8 @@ def run_frozen_backbone_item_split(
         scheduler_cfg = {
             "type": "reduce_on_plateau",
             "factor": 0.5,
-            "patience": 3,
-            "threshold": 0.1,
+            "patience": 5,
+            "threshold": 0.015,
             "mode": "min",
             "threshold_mode": "rel",
         }
