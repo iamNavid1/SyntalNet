@@ -280,7 +280,7 @@ def run_stress_test(
             
             if checkpoint_path is None:
                 logger.warning(f"Checkpoint not found for variant {variant_name}")
-                logger.warning(f"  Searched in: {os.path.join(checkpoint_dir, variant_name)}")
+                logger.warning(f"  Searched in: {checkpoint_dir}")
                 logger.warning(f"Skipping variant {variant_name}")
                 continue
             
@@ -324,9 +324,9 @@ def run_stress_test(
                 if checkpoint_path is None:
                     logger.warning(f"Checkpoint not found for variant {variant_name}, fold {fold_idx}")
                     if split_mode == "kfold":
-                        logger.warning(f"  Searched in: {os.path.join(checkpoint_dir, variant_name, 'kfold', f'fold_{fold_idx:02d}')}")
+                        logger.warning(f"  Searched in: {os.path.join(checkpoint_dir, 'kfold', f'fold_{fold_idx:02d}')}")
                     elif split_mode == "logo":
-                        search_path = os.path.join(checkpoint_dir, variant_name, "logo", f"fold_{held_out_group:02d}") if held_out_group else os.path.join(checkpoint_dir, variant_name, "logo")
+                        search_path = os.path.join(checkpoint_dir, "logo", f"fold_{held_out_group:02d}") if held_out_group else os.path.join(checkpoint_dir, "logo")
                         logger.warning(f"  Searched in: {search_path}")
                     logger.warning(f"Skipping fold {fold_idx + 1} for variant {variant_name}")
                     continue
@@ -412,12 +412,13 @@ def run_stress_test(
     # Export results
     logger.info("=" * 80)
     logger.info("Exporting results...")
-    per_fold_path, aggregated_path = collector.export_csv(
+    per_fold_path, per_construct_path, all_constructs_path = collector.export_csv(
         output_dir,
         filename_prefix="stress_test_results"
     )
     logger.info(f"Per-fold results: {per_fold_path}")
-    logger.info(f"Aggregated results: {aggregated_path}")
+    logger.info(f"Per-construct aggregated results: {per_construct_path}")
+    logger.info(f"All-constructs aggregated results: {all_constructs_path}")
     
     # Summary
     elapsed = time.time() - start_time

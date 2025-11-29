@@ -7,6 +7,14 @@ import numpy as np
 from collections import defaultdict
 
 
+SELECTED_METRICS = {
+    "accuracy",
+    "f1_macro",
+    "auroc_macro",
+    "auprc_macro",
+}
+
+
 class MetricsCollector:
     """
     Collects metrics across folds and corruption scenarios.
@@ -36,7 +44,10 @@ class MetricsCollector:
         for split in metrics:
             for head_name in metrics[split]:
                 for metric_name, metric_value in metrics[split][head_name].items():
-                    # Skip per-class metrics for now (can be added later)
+                    if metric_name not in SELECTED_METRICS:
+                        continue
+                    
+                    # Skip per-class metrics (lists/arrays)
                     if isinstance(metric_value, (list, np.ndarray)):
                         continue
                     
@@ -53,16 +64,30 @@ class MetricsCollector:
     
     def compute_statistics(self) -> Dict[str, List[Dict[str, Any]]]:
         """
-        Compute mean and std across folds for each (variant, corruption, param, split, head, metric).
+        Compute comprehensive statistics across folds.
+        
+        Three levels of aggregation:
+        1. Per-construct (split-head): aggregate over folds for each construct separately
+        2. All-constructs by split: aggregate over all constructs within each split (individual or group)
+        3. All-constructs combined: aggregate over ALL constructs (both individual and group) × folds
         
         Returns:
-            Dict with keys "per_fold" and "aggregated"
+            Dict with keys "per_fold", "per_construct", and "all_constructs"
         """
-        # Group by (variant, corruption, param, split, head, metric)
-        grouped = defaultdict(list)
+        # Group by (variant, corruption, param, split, head, metric) for per-construct stats
+        per_construct_grouped = defaultdict(list)
+        
+        # Group by (variant, corruption, param, split, metric) for all-constructs by split
+        # This aggregates all constructs within each split separately (individual: 2, group: 3)
+        all_constructs_by_split_grouped = defaultdict(list)
+        
+        # Group by (variant, corruption, param, metric) for all-constructs combined
+        # This aggregates across BOTH individual and group splits (all 5 constructs)
+        all_constructs_combined_grouped = defaultdict(list)
         
         for row in self.results["all"]:
-            key = (
+            # Per-construct key (includes split and head)
+            key_per_construct = (
                 row["model_variant"],
                 row["corruption_type"],
                 row["corruption_param"],
@@ -70,15 +95,36 @@ class MetricsCollector:
                 row["head"],
                 row["metric"],
             )
-            grouped[key].append(row["value"])
+            per_construct_grouped[key_per_construct].append(row["value"])
+            
+            # All-constructs by split key (excludes head, but includes split)
+            # This aggregates all constructs within each split (individual: 2, group: 3)
+            key_all_constructs_by_split = (
+                row["model_variant"],
+                row["corruption_type"],
+                row["corruption_param"],
+                row["split"],
+                row["metric"],
+            )
+            all_constructs_by_split_grouped[key_all_constructs_by_split].append(row["value"])
+            
+            # All-constructs combined key (excludes split and head, aggregates across ALL constructs)
+            # This combines both individual (2 constructs) and group (3 constructs) = 5 total
+            key_all_constructs_combined = (
+                row["model_variant"],
+                row["corruption_type"],
+                row["corruption_param"],
+                row["metric"],
+            )
+            all_constructs_combined_grouped[key_all_constructs_combined].append(row["value"])
         
-        # Compute statistics
-        aggregated = []
-        for key, values in grouped.items():
+        # Compute per-construct statistics (aggregate over folds)
+        per_construct_aggregated = []
+        for key, values in per_construct_grouped.items():
             variant, corr_type, corr_param, split, head, metric = key
             values_arr = np.array(values)
             
-            aggregated.append({
+            per_construct_aggregated.append({
                 "model_variant": variant,
                 "corruption_type": corr_type,
                 "corruption_param": corr_param,
@@ -86,15 +132,68 @@ class MetricsCollector:
                 "head": head,
                 "metric": metric,
                 "mean": float(np.mean(values_arr)),
-                "std": float(np.std(values_arr)),
+                "std": float(np.std(values_arr, ddof=1)),  # Sample std
                 "min": float(np.min(values_arr)),
                 "max": float(np.max(values_arr)),
+                "median": float(np.median(values_arr)),
+                "q1": float(np.percentile(values_arr, 25)),
+                "q3": float(np.percentile(values_arr, 75)),
                 "n_folds": len(values),
+            })
+        
+        # Compute all-constructs statistics (two types)
+        all_constructs_aggregated = []
+        
+        # Type a) All-constructs by split (aggregates all constructs within each split)
+        # Individual: 2 constructs × folds, Group: 3 constructs × folds
+        for key, values in all_constructs_by_split_grouped.items():
+            variant, corr_type, corr_param, split, metric = key
+            values_arr = np.array(values)
+            
+            all_constructs_aggregated.append({
+                "model_variant": variant,
+                "corruption_type": corr_type,
+                "corruption_param": corr_param,
+                "split": split,  # "individual" or "group"
+                "head": "all_constructs",  # Special marker
+                "metric": metric,
+                "mean": float(np.mean(values_arr)),
+                "std": float(np.std(values_arr, ddof=1)),  # Sample std
+                "min": float(np.min(values_arr)),
+                "max": float(np.max(values_arr)),
+                "median": float(np.median(values_arr)),
+                "q1": float(np.percentile(values_arr, 25)),
+                "q3": float(np.percentile(values_arr, 75)),
+                "n_folds": len(values),  # Total number of values (constructs in split × folds)
+            })
+        
+        # Type b) All-constructs combined (aggregates across both splits)
+        # This aggregates across both individual (2) and group (3) splits = 5 constructs total
+        for key, values in all_constructs_combined_grouped.items():
+            variant, corr_type, corr_param, metric = key
+            values_arr = np.array(values)
+            
+            all_constructs_aggregated.append({
+                "model_variant": variant,
+                "corruption_type": corr_type,
+                "corruption_param": corr_param,
+                "split": "all",  # Aggregates across both individual and group splits
+                "head": "all_constructs",  # Special marker
+                "metric": metric,
+                "mean": float(np.mean(values_arr)),
+                "std": float(np.std(values_arr, ddof=1)),  # Sample std
+                "min": float(np.min(values_arr)),
+                "max": float(np.max(values_arr)),
+                "median": float(np.median(values_arr)),
+                "q1": float(np.percentile(values_arr, 25)),
+                "q3": float(np.percentile(values_arr, 75)),
+                "n_folds": len(values),  # Total number of values (5 constructs × folds)
             })
         
         return {
             "per_fold": self.results["all"],
-            "aggregated": aggregated,
+            "per_construct": per_construct_aggregated,
+            "all_constructs": all_constructs_aggregated,
         }
     
     def export_csv(
@@ -108,6 +207,9 @@ class MetricsCollector:
         Args:
             output_dir: Directory to save CSV files
             filename_prefix: Prefix for output files
+        
+        Returns:
+            Tuple of (per_fold_path, per_construct_path, all_constructs_path)
         """
         os.makedirs(output_dir, exist_ok=True)
         
@@ -117,11 +219,15 @@ class MetricsCollector:
         per_fold_path = os.path.join(output_dir, f"{filename_prefix}_per_fold.csv")
         self._write_csv(per_fold_path, stats["per_fold"])
         
-        # Export aggregated results
-        aggregated_path = os.path.join(output_dir, f"{filename_prefix}_aggregated.csv")
-        self._write_csv(aggregated_path, stats["aggregated"])
+        # Export per-construct aggregated results
+        per_construct_path = os.path.join(output_dir, f"{filename_prefix}_per_construct.csv")
+        self._write_csv(per_construct_path, stats["per_construct"])
         
-        return per_fold_path, aggregated_path
+        # Export all-constructs aggregated results
+        all_constructs_path = os.path.join(output_dir, f"{filename_prefix}_all_constructs.csv")
+        self._write_csv(all_constructs_path, stats["all_constructs"])
+        
+        return per_fold_path, per_construct_path, all_constructs_path
     
     def _write_csv(self, filepath: str, rows: List[Dict[str, Any]]):
         """Write rows to CSV file."""

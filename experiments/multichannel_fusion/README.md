@@ -24,26 +24,28 @@ python experiments/multichannel_fusion/runner.py \
 **For kfold/logo splits:**
 ```
 checkpoint_dir/
-├── bscx/kfold/fold_00/best.pth (or latest.pth, epoch_100.pth, checkpoint.pth)
-├── bscx/kfold/fold_01/best.pth
-├── proj_only/kfold/fold_00/best.pth
+├── kfold/fold_00/best.pth (or latest.pth, epoch_100.pth, checkpoint.pth)
+├── kfold/fold_01/best.pth
 └── ...
 ```
 
 **For item/group splits:**
 ```
 checkpoint_dir/
-├── bscx/best.pth (or latest.pth, epoch_100.pth, checkpoint.pth)
-├── proj_only/best.pth
-├── concat_proj/best.pth
-└── uniform_avg/best.pth
+├── best.pth (or latest.pth, epoch_100.pth, checkpoint.pth)
+└── ...
 ```
 
 ## Output
 
-- `stress_test_results_per_fold.csv`: Per-fold metrics
-- `stress_test_results_aggregated.csv`: Aggregated metrics (mean/std)
+- `stress_test_results_per_fold.csv`: Per-fold raw metrics
+- `stress_test_results_per_construct.csv`: Per-construct aggregated stats (over folds)
+- `stress_test_results_all_constructs.csv`: All-constructs aggregated stats (by split and combined)
 - `stress_test.log`: Execution log
+
+**Metrics collected**: accuracy, f1_macro, auroc_macro, auprc_macro
+
+**Statistics computed**: mean, std, min, max, median, q1, q3, n_folds
 
 ## Model Variants
 

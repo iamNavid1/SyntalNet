@@ -170,6 +170,14 @@ Examples:
         default="sosex_ablation",
         help="Base name for output figure files (default: sosex_ablation)"
     )
+    parser.add_argument(
+        "--metrics",
+        type=str,
+        nargs="+",
+        choices=list(METRICS_OF_INTEREST.keys()),
+        default=list(METRICS_OF_INTEREST.keys()),
+        help="Metrics to visualize (default: all metrics). Choices: " + ", ".join(METRICS_OF_INTEREST.keys())
+    )
     
     return parser.parse_args()
 
@@ -557,6 +565,8 @@ def build_metrics_data(all_metrics: Dict[str, Dict[str, Dict[str, Dict[str, floa
 
 def visualize_ablation(
     metrics_data: Dict[str, np.ndarray],
+    all_metrics: Dict[str, Dict[str, Dict[str, Dict[str, float]]]],
+    selected_metrics: List[str],
     output_dir: str,
     figure_name: str = "sosex_ablation",
     show: bool = True
@@ -565,11 +575,17 @@ def visualize_ablation(
     Create the ablation visualization figure.
     
     Args:
-        metrics_data: Dictionary mapping metric names to numpy arrays
+        metrics_data: Dictionary mapping metric names to numpy arrays (mean values)
+        all_metrics: Dictionary mapping variant keys to label metrics with all stats
+                     {variant_key: {label_key: {metric_name: {stat_name: value}}}}
+        selected_metrics: List of metric names to visualize
         output_dir: Directory to save the figure
         figure_name: Base name for output figure files
         show: Whether to display the figure
     """
+    # Filter metrics_data to only include selected metrics
+    filtered_metrics_data = {k: v for k, v in metrics_data.items() if k in selected_metrics}
+    
     # Get labels and legend labels
     labels = [lc["name"] for lc in LABEL_CONSTRUCTS]
     legend_labels = [MODEL_VARIANTS[vk]["label"] for vk in MODEL_ORDER]
@@ -589,6 +605,8 @@ def visualize_ablation(
     })
     
     palette = ["#5B8FF9", "#61DDAA", "#65789B", "#F6BD16"]
+    # Box plot color: unified dark neutral color for all box plots
+    box_color = "#2C2C2C"  # Dark neutral gray
     
     # Geometry settings
     num_labels = len(labels)
@@ -617,34 +635,132 @@ def visualize_ablation(
             hi = min(1.0, lo + 0.20)
         return lo, hi
     
-    def place_value_labels(ax, bars, min_sep=0.0):
-        centers = np.array([b.get_x() + b.get_width() / 2 for b in bars])
-        heights = np.array([b.get_height() for b in bars])
-        order = np.argsort(centers)
-        prev_y, sign = None, 1
-        for idx in order:
-            x, y = centers[idx], heights[idx]
-            label_y = y + 0.006
-            if prev_y is not None and abs(label_y - prev_y) < min_sep:
-                label_y = prev_y + sign * (min_sep - abs(label_y - prev_y))
-                sign *= -1
-            ax.text(x, label_y, f"{y:.3f}", ha="center", va="bottom",
-                    fontsize=8, zorder=10, clip_on=False)
-            prev_y = label_y
+    def build_boxplot_data(metric_name: str) -> Dict[Tuple[int, int], Dict[str, float]]:
+        """
+        Build box plot data from all_metrics statistics.
+        Returns dict mapping (label_idx, variant_idx) to box plot stats.
+        """
+        box_data = {}
+        for var_idx, variant_key in enumerate(MODEL_ORDER):
+            if variant_key not in all_metrics:
+                continue
+            variant_metrics = all_metrics[variant_key]
+            for label_idx, label_info in enumerate(LABEL_CONSTRUCTS):
+                label_key = label_info["key"]
+                if label_key not in variant_metrics:
+                    continue
+                label_metrics = variant_metrics[label_key]
+                if metric_name in label_metrics:
+                    stat_values = label_metrics[metric_name]
+                    if isinstance(stat_values, dict):
+                        # Extract box plot statistics
+                        box_stats = {}
+                        for stat in ["min", "q1", "median", "q3", "max"]:
+                            if stat in stat_values:
+                                box_stats[stat] = stat_values[stat]
+                        if len(box_stats) >= 3:  # Need at least min, median, max
+                            box_data[(label_idx, var_idx)] = box_stats
+        return box_data
+    
+    def draw_boxplot(ax, x, box_stats, color, width_factor=0.6):
+        """
+        Draw a box plot at position x using the box statistics.
+        width_factor controls the width relative to bar_width.
+        """
+        if "min" not in box_stats or "max" not in box_stats:
+            return
+        
+        min_val = box_stats["min"]
+        max_val = box_stats["max"]
+        median_val = box_stats.get("median", (min_val + max_val) / 2)
+        q1_val = box_stats.get("q1", min_val)
+        q3_val = box_stats.get("q3", max_val)
+        
+        box_width = bar_width * width_factor
+        whisker_width = box_width * 0.3
+        
+        # Draw whiskers (min to max)
+        ax.plot([x, x], [min_val, max_val], color=color, linewidth=0.8, zorder=4, clip_on=False, alpha=0.33)
+        ax.plot(
+            [x - whisker_width/2, x + whisker_width/2],
+            [min_val, min_val],
+            color=color,
+            linewidth=0.8,
+            zorder=4,
+            clip_on=False,
+            alpha=0.33
+        )
+        ax.plot(
+            [x - whisker_width/2, x + whisker_width/2],
+            [max_val, max_val],
+            color=color,
+            linewidth=0.8,
+            zorder=4,
+            clip_on=False,
+            alpha=0.33
+        )
+
+        # Draw box (q1 to q3)
+        if "q1" in box_stats and "q3" in box_stats:
+            box_height = q3_val - q1_val
+            box_bottom = q1_val
+            # Draw box outline (no fill)
+            rect = Rectangle(
+                (x - box_width/2, box_bottom),
+                box_width,
+                box_height,
+                linewidth=0.8,
+                edgecolor=color,
+                facecolor='none',
+                zorder=4,
+                clip_on=False,
+                alpha=0.33
+            )
+            ax.add_patch(rect)
+
+        # Draw median line
+        ax.plot(
+            [x - box_width/2, x + box_width/2],
+            [median_val, median_val],
+            color=color,
+            linewidth=0.8,
+            zorder=5,
+            clip_on=False,
+            alpha=0.33
+        )
+    
+    # Determine figure size based on number of metrics
+    num_metrics = len(selected_metrics)
+    if num_metrics == 1:
+        fig_width = 5.5
+        fig_height = 3.6
+    elif num_metrics == 2:
+        fig_width = 11
+        fig_height = 3.6
+    elif num_metrics == 3:
+        fig_width = 16.5
+        fig_height = 3.6
+    else:  # 4 metrics
+        fig_width = 21
+        fig_height = 3.6
     
     # Create figure
-    fig, axes = plt.subplots(1, 4, figsize=(21, 3.6), sharey=False)
+    if num_metrics == 1:
+        fig, axes = plt.subplots(1, 1, figsize=(fig_width, fig_height), sharey=False)
+        axes = [axes]  # Make it iterable
+    else:
+        fig, axes = plt.subplots(1, num_metrics, figsize=(fig_width, fig_height), sharey=False)
     fig.patch.set_facecolor('#FAFAFB')
     custom_ylim = {"AUPRC": (0.40, 0.75)}
     
-    for ax, (metric_name, metric_matrix) in zip(axes, metrics_data.items()):
+    for ax, (metric_name, metric_matrix) in zip(axes, filtered_metrics_data.items()):
         y_lo, y_hi = custom_ylim.get(metric_name, compute_ylim(metric_matrix))
         
         # Background bands
         for i in range(num_labels):
             ax.add_patch(Rectangle(
-                (x_positions[i, 0] - 0., y_lo),
-                block_width + 0.,
+                (x_positions[i, 0] - bar_width / 2, y_lo),
+                block_width,
                 y_hi - y_lo,
                 facecolor='#F4F6FA',
                 edgecolor='none',
@@ -660,19 +776,24 @@ def visualize_ablation(
                 metric_matrix[:, c],
                 width=bar_width,
                 color=palette[c],
-                edgecolor='white',
-                linewidth=1.2,
+                edgecolor='none',
                 alpha=0.97,
                 zorder=3,
                 label=legend_labels[c]
             )
             all_bars.append(bars)
         
-        # Value labels
-        for i in range(num_labels):
-            place_value_labels(ax, [all_bars[c][i] for c in range(num_conditions)], min_sep=0.0)
+        # Box plots overlaid on bars
+        box_data = build_boxplot_data(metric_name)
+        for (label_idx, var_idx), box_stats in box_data.items():
+            x_pos = x_positions[label_idx, var_idx]
+            draw_boxplot(ax, x_pos, box_stats, box_color, width_factor=0.6)
         
-        ax.set_title(metric_name, pad=6, fontsize=13, weight='bold', color='#1A1A1A')
+        if num_metrics > 1:
+            ax.set_title(metric_name, pad=6, fontsize=13, weight='bold', color='#1A1A1A')
+        else:
+            ax.set_ylabel(metric_name, fontsize=10, color='#2C2C2C')
+        
         ax.set_ylim(y_lo, y_hi)
         ax.set_xticks(group_centers)
         ax.set_xticklabels(labels, ha="center", fontsize=10, color='#2C2C2C')
@@ -684,13 +805,21 @@ def visualize_ablation(
     
     # Legend
     handles, _ = axes[0].get_legend_handles_labels()
+    # Break legend into 2 lines if only 1 metric
+    if num_metrics == 1:
+        ncol = 2
+        bbox_y = 1.08
+    else:
+        ncol = 4
+        bbox_y = 1.03
+    
     fig.legend(
         handles[:4],
         legend_labels,
         loc="upper center",
-        ncol=4,
+        ncol=ncol,
         frameon=False,
-        bbox_to_anchor=(0.5, 1.03),
+        bbox_to_anchor=(0.5, bbox_y),
         columnspacing=2.8,
         handlelength=1.8
     )
@@ -809,11 +938,21 @@ def main():
     print("Building Visualization")
     print("=" * 60)
     
+    # Validate selected metrics
+    valid_metrics = [m for m in args.metrics if m in METRICS_OF_INTEREST]
+    if not valid_metrics:
+        print(f"Error: No valid metrics selected. Available metrics: {list(METRICS_OF_INTEREST.keys())}")
+        return
+    
+    print(f"Visualizing metrics: {', '.join(valid_metrics)}")
+    
     metrics_data = build_metrics_data(all_metrics)
     
     # Create visualization
     visualize_ablation(
         metrics_data,
+        all_metrics,
+        valid_metrics,
         args.output_dir,
         figure_name=args.figure_name,
         show=not args.no_show

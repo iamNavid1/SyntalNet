@@ -108,12 +108,12 @@ def find_checkpoint_path(
 ) -> Optional[str]:
     """
     Find checkpoint path based on split mode and fold index.
-    - For "item", "group": looks for single checkpoint per variant
+    - For "item", "group": looks for single checkpoint
     - For "kfold", "logo": looks for per-fold checkpoints
     
     Args:
-        checkpoint_dir: Base checkpoint directory
-        variant_name: Model variant name (e.g., "bscx", "concat_proj")
+        checkpoint_dir: Base checkpoint directory (checkpoints are directly under this)
+        variant_name: Model variant name (kept for compatibility, not used in path)
         split_mode: Split mode from config ("item", "group", "logo", "kfold")
         fold_idx: Fold index (required for kfold/logo mode, ignored otherwise)
         held_out_group: Held-out group ID for logo mode (if None, uses fold_idx)
@@ -121,7 +121,6 @@ def find_checkpoint_path(
     Returns:
         Path to checkpoint file, or None if not found
     """
-    variant_dir = os.path.join(checkpoint_dir, variant_name)
     checkpoint_names = ["best.pth", "latest.pth", "epoch_100.pth", "checkpoint.pth"]
     
     # For k-fold, checkpoints are in fold-specific subdirectories
@@ -131,24 +130,24 @@ def find_checkpoint_path(
         
         # Try kfold/fold_XX structure (standard from training)
         fold_tag = f"fold_{fold_idx:02d}"
-        fold_dir = os.path.join(variant_dir, "kfold", fold_tag)
+        fold_dir = os.path.join(checkpoint_dir, "kfold", fold_tag)
         
         for ckpt_name in checkpoint_names:
             ckpt_path = os.path.join(fold_dir, ckpt_name)
             if os.path.exists(ckpt_path):
                 return ckpt_path
         
-        # Alternative: try direct fold_XX in variant directory
-        fold_dir_alt = os.path.join(variant_dir, fold_tag)
+        # Alternative: try direct fold_XX in checkpoint directory
+        fold_dir_alt = os.path.join(checkpoint_dir, fold_tag)
         for ckpt_name in checkpoint_names:
             ckpt_path = os.path.join(fold_dir_alt, ckpt_name)
             if os.path.exists(ckpt_path):
                 return ckpt_path
         
-        # Alternative: try fold-specific checkpoint names in variant directory
+        # Alternative: try fold-specific checkpoint names in checkpoint directory
         for ckpt_name in checkpoint_names:
             base_name = os.path.splitext(ckpt_name)[0]
-            ckpt_path = os.path.join(variant_dir, f"{base_name}_fold_{fold_idx:02d}.pth")
+            ckpt_path = os.path.join(checkpoint_dir, f"{base_name}_fold_{fold_idx:02d}.pth")
             if os.path.exists(ckpt_path):
                 return ckpt_path
         
@@ -157,7 +156,7 @@ def find_checkpoint_path(
     # For logo (leave-one-group-out), checkpoints are also per-fold
     elif split_mode == "logo":        
         fold_tag = f"fold_{fold_idx:02d}"
-        fold_dir = os.path.join(variant_dir, "logo", fold_tag)
+        fold_dir = os.path.join(checkpoint_dir, "logo", fold_tag)
         
         for ckpt_name in checkpoint_names:
             ckpt_path = os.path.join(fold_dir, ckpt_name)
@@ -166,13 +165,13 @@ def find_checkpoint_path(
         
         if held_out_group is not None:
             fold_tag = f"fold_{held_out_group:02d}"
-            fold_dir = os.path.join(variant_dir, "logo", fold_tag)
+            fold_dir = os.path.join(checkpoint_dir, "logo", fold_tag)
             for ckpt_name in checkpoint_names:
                 ckpt_path = os.path.join(fold_dir, ckpt_name)
                 if os.path.exists(ckpt_path):
                     return ckpt_path
         
-        logo_dir = os.path.join(variant_dir, "logo")
+        logo_dir = os.path.join(checkpoint_dir, "logo")
         if os.path.exists(logo_dir):
             fold_dirs = sorted([d for d in os.listdir(logo_dir) if d.startswith("fold_")])
             if fold_idx < len(fold_dirs):
@@ -185,9 +184,9 @@ def find_checkpoint_path(
         return None
     
     else:
-        # For item, group: single checkpoint per variant
+        # For item, group: single checkpoint in checkpoint directory
         for ckpt_name in checkpoint_names:
-            ckpt_path = os.path.join(variant_dir, ckpt_name)
+            ckpt_path = os.path.join(checkpoint_dir, ckpt_name)
             if os.path.exists(ckpt_path):
                 return ckpt_path
         
