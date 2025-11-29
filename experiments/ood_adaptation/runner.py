@@ -868,8 +868,8 @@ def main():
     )
     parser.add_argument(
         "--lr-divisor",
-        type=int,
-        default=1,
+        type=float,
+        default=1.0,
         help="Divide base LR by this factor for fine-tuning (default: 1 for Exp1, unused for Exp3)"
     )
     parser.add_argument(
