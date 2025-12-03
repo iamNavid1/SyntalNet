@@ -12,7 +12,7 @@ class WarmupCosineLR(_LRScheduler):
         self.warmup_steps = warmup_steps
         self.max_steps = max_steps
         self.min_lr = min_lr
-        super().__init__()
+        super().__init__(optimizer, last_epoch)
 
     def get_lr(self):
         step = self.last_epoch + 1
@@ -30,7 +30,7 @@ class WarmupConstantLR(_LRScheduler):
     def __init__(self, optimizer: Optimizer, warmup_steps: int, max_steps: int, last_epoch: int = -1):
         self.warmup_steps = warmup_steps
         self.max_steps = max_steps
-        super().__init__()
+        super().__init__(optimizer, last_epoch)
 
     def get_lr(self):
         step = self.last_epoch + 1
@@ -73,8 +73,8 @@ def build_scheduler(optimizer: Optimizer, config: Any):
 
     if sched_type == "reduce_on_plateau":
         factor = float(config.get("factor", 0.5))
-        patience = int(config.get("patience", 3))
-        threshold = float(config.get("threshold", 0.1))
+        patience = int(config.get("patience", 5))
+        threshold = float(config.get("threshold", 0.01))
         mode = config.get("mode", "min")
         threshold_mode = config.get("threshold_mode", "rel")
         min_lr = float(config.get("min_lr", 1e-7))

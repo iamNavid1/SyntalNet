@@ -45,5 +45,5 @@ training:
   ckpt_interval: 10
 
 logging:
-  log_dir: ./logs/EXPT_BSCX_uniform-avg
-  checkpoint_dir: ./checkpoints/EXPT_BSCX_uniform-avg
+  log_dir: ./logs/EXPT_BSCX_uniform_avg
+  checkpoint_dir: ./checkpoints/EXPT_BSCX_uniform_avg

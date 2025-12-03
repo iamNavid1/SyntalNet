@@ -24,7 +24,7 @@ from experiments.multichannel_fusion.model_loader import (
 )
 from experiments.common.dataset_builder import build_datasets, build_dataloader
 from experiments.multichannel_fusion.evaluator import StressTestEvaluator
-from experiments.common.metrics_collector import MetricsCollector
+from experiments.multichannel_fusion.metrics_collector import MetricsCollector
 
 
 # Corruption sweep configurations

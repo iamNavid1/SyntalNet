@@ -7,11 +7,11 @@ Stress-testing evaluation for GLR_X multimodal fusion and baseline variants unde
 ```bash
 python experiments/multimodal_fusion/runner.py \
     --configs configs/EXPT_GLRX_glrx.yaml \
-              configs/EXPT_GLRX_uniform-avg.yaml \
+              configs/EXPT_GLRX_uniform_avg.yaml \
               configs/EXPT_GLRX_gated_sum.yaml \
               configs/EXPT_GLRX_pairwise.yaml \
               configs/EXPT_GLRX_concat_mlp.yaml \
-    --output-dir multimodal_fusion_results/multimodal_fusion/
+    --output-dir experiments/multimodal_fusion_results
 ```
 
 ### Arguments

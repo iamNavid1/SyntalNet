@@ -1,42 +1,21 @@
 """
-BSCX Ablation Results Visualization
+GLRX Ablation Results Visualization
 
-This script visualizes stress test results from multichannel_fusion/runner.py.
+This script visualizes stress test results from multimodal_fusion/runner.py.
 
 Usage Examples:
 
-1. All-constructs aggregated (group split):
-   python experiments/viz/BSCX_ablation_results.py \
-       --csv experiments/multichannel_fusion_results/stress_test_results_all_constructs.csv \
-       --aggregation-level all_constructs \
-       --split-filter group \
-       --outdir experiments/viz_results/bscx
-
-2. All-constructs aggregated (individual split):
-   python experiments/viz/BSCX_ablation_results.py \
-       --csv experiments/multichannel_fusion_results/stress_test_results_all_constructs.csv \
-       --aggregation-level all_constructs \
-       --split-filter individual \
-       --outdir experiments/viz_results/bscx
-
-3. All-constructs aggregated (all splits combined):
-   python experiments/viz/BSCX_ablation_results.py \
-       --csv experiments/multichannel_fusion_results/stress_test_results_all_constructs.csv \
-       --aggregation-level all_constructs \
-       --split-filter all \
-       --outdir experiments/viz_results/bscx
-
-4. Per-construct aggregated:
-   python experiments/viz/BSCX_ablation_results.py \
-       --csv experiments/multichannel_fusion_results/stress_test_results_per_construct.csv \
-       --aggregation-level per_construct \
-       --outdir experiments/viz_results/bscx
-
-5. Per-fold visualization:
-   python experiments/viz/BSCX_ablation_results.py \
-       --csv experiments/multichannel_fusion_results/stress_test_results_per_fold.csv \
+1. Per-fold visualization:
+   python experiments/viz/GLRX_ablation_results.py \
+       --csv experiments/multimodal_fusion_results/multimodal_fusion_results_per_fold.csv \
        --aggregation-level per_fold \
-       --outdir experiments/viz_results/bscx
+       --outdir experiments/viz_results/glrx
+
+2. Aggregated visualization:
+   python experiments/viz/GLRX_ablation_results.py \
+       --csv experiments/multimodal_fusion_results/multimodal_fusion_results_aggregated.csv \
+       --aggregation-level aggregated \
+       --outdir experiments/viz_results/glrx
 """
 
 import os
@@ -68,22 +47,22 @@ PALETTE = ["#5B8FF9", "#61DDAA", "#65789B", "#F6BD16", "#FF6B6B"]
 
 # Explicit overrides for key variants (case-insensitive)
 COLOR_OVERRIDES = {
-    "bscx": "#F6BD16",        # golden
-    "concat_proj": "#61DDAA",  # green
-    "concat-proj": "#61DDAA",  # green (with hyphen)
+    "glrx": "#F6BD16",        # golden
+    "glr_x": "#F6BD16",       # golden
+    "concat_mlp": "#61DDAA",  # green
     "uniform_avg": "#5B8FF9", # blue
-    "uniform-avg": "#5B8FF9", # blue (with hyphen)
-    "proj_only": "#65789B",   # gray-blue
+    "gated_sum": "#65789B",   # gray-blue
+    "pairwise": "#FF6B6B",    # red
 }
 
 # Mapping from model variant names to display names for legend
 VARIANT_DISPLAY_NAMES = {
-    "bscx": "BSC-X",
-    "concat_proj": "Concat + Proj",
-    "concat-proj": "Concat + Proj",
-    "uniform_avg": "Uniform Avg",
-    "uniform-avg": "Uniform Avg",
-    "proj_only": "Proj Only",
+    "glrx": "GLR-X",
+    "glr_x": "GLR-X",
+    "uniform_avg": "Mean Pooling",
+    "gated_sum": "Gated Sum",
+    "pairwise": "Pairwise",
+    "concat_mlp": "Concat + MLP",
 }
 
 
@@ -132,7 +111,7 @@ def plot_corruption_trends(
     csv_path: str,
     output_dir: str,
     only_variants: Optional[List[str]] = None,
-    metric_name: str = "auprc_macro",
+    metric_name: str = "f1_macro",
     show: bool = False,
     fit_line: bool = False,
     aggregation_level: str = "per_fold",
@@ -140,20 +119,20 @@ def plot_corruption_trends(
     head_filter: Optional[str] = None,
 ):
     """
-    Creates a single figure with up to 5 horizontally stacked subplots:
-        Stream Dropout | Channel Dropout | Temporal Band | Jitter | Noise
+    Creates a single figure with up to 4 horizontally stacked subplots:
+        Modality Dropout | Modality Noise | Modality Shuffle | Modality Rescale
 
     Each subplot:
       - X-axis: corruption_param (with specific tick sets per corruption type)
-      - Y-axis: metric_name (default: auprc_macro)
+      - Y-axis: metric_name
       - One line per model_variant:
           * For per_fold: Transparent per-fold points + means
           * For aggregated: Mean ± std error bars or just means
 
     Args:
-        csv_path: Path to CSV file (per_fold, per_construct, or all_constructs)
-        aggregation_level: "per_fold", "per_construct", or "all_constructs"
-        split_filter: Filter by split (e.g., "individual", "group", "all", or None for all)
+        csv_path: Path to CSV file (per_fold or aggregated)
+        aggregation_level: "per_fold" or "aggregated"
+        split_filter: Filter by split (e.g., "individual", "group", or None for all)
         head_filter: Filter by head (construct name, or None for all)
     """
 
@@ -175,37 +154,18 @@ def plot_corruption_trends(
             print("No rows left after filtering by model_variant.")
             return
 
-    # Handle head filtering based on aggregation level
-    if aggregation_level == "all_constructs":
-        # For all_constructs, head should be "all_constructs"
-        # If head_filter is None, only show all_constructs rows
-        # If head_filter is specified, use it (though it should typically be "all_constructs")
-        if head_filter is None:
-            df = df[df["head"] == "all_constructs"].copy()
-        else:
-            df = df[df["head"] == head_filter].copy()
-    elif aggregation_level == "per_construct":
-        # For per_construct, head should NOT be "all_constructs"
-        # If head_filter is None, exclude all_constructs rows
-        # If head_filter is specified, use it
-        if head_filter is None:
-            df = df[df["head"] != "all_constructs"].copy()
-        else:
-            df = df[df["head"] == head_filter].copy()
-    else:  # per_fold
-        # For per_fold, use head_filter as-is
-        if head_filter is not None:
-            df = df[df["head"] == head_filter].copy()
-    
-    if df.empty:
-        print(f"No rows left after filtering by head (aggregation_level={aggregation_level}).")
-        return
-
     # Filter by split if specified
     if split_filter is not None:
         df = df[df["split"] == split_filter].copy()
         if df.empty:
             print(f"No rows left after filtering by split='{split_filter}'.")
+            return
+
+    # Filter by head if specified
+    if head_filter is not None:
+        df = df[df["head"] == head_filter].copy()
+        if df.empty:
+            print(f"No rows left after filtering by head='{head_filter}'.")
             return
 
     # Numeric corruption_param
@@ -252,27 +212,29 @@ def plot_corruption_trends(
         corr_norm_map[orig] = norm
 
     # Determine which corruption_type maps to which logical panel
-    # BSCX corruption types: temporal_band, jitter, noise
-    panel_kinds = ["jitter", "noise", "temporal_band"]
+    panel_kinds = ["dropout", "noise", "shuffle", "rescale"]
     ordered_corr_info = []  # list of (kind, orig_corr_type)
 
     for kind in panel_kinds:
         found_type = None
         for orig, norm in corr_norm_map.items():
-            if kind == "temporal_band" and ("temporal" in norm or "band" in norm):
+            if kind == "dropout" and "dropout" in norm:
                 found_type = orig
                 break
-            elif kind == "jitter" and "jitter" in norm:
+            elif kind == "noise" and "noise" in norm:
                 found_type = orig
                 break
-            elif kind == "noise" and "noise" in norm and "dropout" not in norm:
+            elif kind == "shuffle" and "shuffle" in norm:
+                found_type = orig
+                break
+            elif kind == "rescale" and "rescale" in norm:
                 found_type = orig
                 break
         if found_type is not None:
             ordered_corr_info.append((kind, found_type))
 
     if not ordered_corr_info:
-        print("No recognized corruption_types (temporal_band/jitter/noise) found in CSV.")
+        print("No recognized corruption_types (dropout/noise/shuffle/rescale) found in CSV.")
         return
 
     n_panels = len(ordered_corr_info)
@@ -280,7 +242,7 @@ def plot_corruption_trends(
     # Figure + layout (no shared y-range: each subplot gets its own)
     fig, axes = plt.subplots(
         1, n_panels,
-        figsize=(13, 3.6),
+        figsize=(20, 3.6) if n_panels == 4 else (16, 3.6),
         sharey=False,
     )
     if n_panels == 1:
@@ -425,7 +387,7 @@ def plot_corruption_trends(
                         ys_means,
                         yerr=ys_stds,
                         color=col,
-                        alpha=0.4,
+                        alpha=0.3,
                         linewidth=0.8,
                         capsize=3,
                         capthick=0.8,
@@ -438,27 +400,31 @@ def plot_corruption_trends(
                 handles_for_legend.append(line)
 
         # Titles and x-axis labels per panel
-        if kind == "temporal_band":
-            ax.set_title("Temporal Band Masking", pad=6, color="#1A1A1A")
-            ax.set_xlabel("Masked Sequence Fraction")
+        if kind == "dropout":
+            ax.set_title("Modality Dropout", pad=6, color="#1A1A1A")
+            ax.set_xlabel("Dropout Probability")
             desired_ticks = [0.0, 0.15, 0.30, 0.45, 0.60, 0.75]
-        elif kind == "jitter":
-            ax.set_title("Misalignment Jitter", pad=6, color="#1A1A1A")
-            ax.set_xlabel("Max Random Temporal Jitter (± time steps)")
-            desired_ticks = [0, 5, 10, 15, 20, 25]
-        else:  # "noise"
-            ax.set_title("Feature Noise", pad=6, color="#1A1A1A")
+        elif kind == "noise":
+            ax.set_title("Modality Noise", pad=6, color="#1A1A1A")
             ax.set_xlabel("Relative Gaussian Noise Scale (σ_noise / σ_feature)")
             desired_ticks = [0.0, 0.15, 0.30, 0.45, 0.60, 0.75]
+        elif kind == "shuffle":
+            ax.set_title("Modality Shuffle", pad=6, color="#1A1A1A")
+            ax.set_xlabel("Shuffle Probability")
+            desired_ticks = [0.0, 0.15, 0.30, 0.45, 0.60, 0.75]
+        else:  # "rescale"
+            ax.set_title("Modality Rescale", pad=6, color="#1A1A1A")
+            ax.set_xlabel("Rescale Factor")
+            desired_ticks = [0.1, 0.5, 1.0, 2.0, 5.0, 10.0]
 
         # Keep only ticks where we actually have data
         cp_vals = np.unique(df_corr["corruption_param"].values.astype(float))
         valid_ticks = [t for t in desired_ticks if np.any(np.isclose(cp_vals, t, atol=1e-8))]
 
         ax.set_xticks(valid_ticks)
-        # Format tick labels: two decimals for most, but for jitter use integers
-        if kind == "jitter":
-            ax.set_xticklabels([f"{int(t)}" for t in valid_ticks])
+        # Format tick labels: two decimals for most, but for rescale use appropriate precision
+        if kind == "rescale":
+            ax.set_xticklabels([f"{t:.1f}" if t < 1.0 else f"{int(t) if t == int(t) else t:.1f}" for t in valid_ticks])
         else:
             ax.set_xticklabels([f"{t:.2f}" for t in valid_ticks])
 
@@ -472,7 +438,7 @@ def plot_corruption_trends(
             ax.spines[spine].set_color("#A9B2C3")
 
     # Shared Y label (left side of figure)
-    ylabel = f"Mean {metric_name.upper().replace('_', ' ').replace('MACRO', '')}"
+    ylabel = f"Mean {metric_name.upper().replace('_', ' ')}"
     if split_filter:
         ylabel += f" ({split_filter.capitalize()})"
     if head_filter:
@@ -533,9 +499,8 @@ def main():
         description=(
             "Plot corruption sweeps with per-fold points and either "
             "quadratic trend lines or straight-line connections per model variant.\n"
-            "Produces a single figure with up to 5 horizontal subplots "
-            "(Stream Dropout, Channel Dropout, Temporal Band Mask, Jitter, Noise).\n"
-            "Default metric: auprc_macro (AUPRC)."
+            "Produces a single figure with up to 4 horizontal subplots "
+            "(Modality Dropout, Modality Noise, Modality Shuffle, Modality Rescale)."
         )
     )
     parser.add_argument(
@@ -556,15 +521,15 @@ def main():
         default=None,
         help=(
             "Comma-separated list of model_variant names to include "
-            "(e.g. 'bscx,concat_proj,uniform_avg'). "
+            "(e.g. 'glrx,uniform_avg,gated_sum,pairwise,concat_mlp'). "
             "If omitted, all variants present in the CSV are used."
         ),
     )
     parser.add_argument(
         "--metric",
         type=str,
-        default="auprc_macro",
-        help="Metric name to plot (default: auprc_macro).",
+        default="f1_macro",
+        help="Metric name to plot (default: f1_macro).",
     )
     parser.add_argument(
         "--fit-line",
@@ -584,11 +549,10 @@ def main():
         "--aggregation-level",
         type=str,
         default="per_fold",
-        choices=["per_fold", "per_construct", "all_constructs"],
+        choices=["per_fold", "aggregated"],
         help=(
             "Aggregation level: 'per_fold' uses per_fold CSV, "
-            "'per_construct' uses per_construct CSV (aggregated over folds, per construct), "
-            "'all_constructs' uses all_constructs CSV (aggregated across all constructs)."
+            "'aggregated' uses aggregated CSV."
         ),
     )
     parser.add_argument(
@@ -596,8 +560,7 @@ def main():
         type=str,
         default=None,
         help=(
-            "Filter by split type (e.g., 'individual', 'group', 'all'). "
-            "For all_constructs aggregation level, 'all' aggregates across both individual and group splits. "
+            "Filter by split type (e.g., 'individual', 'group'). "
             "If None, shows all splits."
         ),
     )

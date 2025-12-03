@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 import torch
 from torchmetrics.classification import (
@@ -60,3 +60,33 @@ def compute_metrics(metrics: Dict[str, torch.nn.Module]) -> Dict[str, Any]:
             results[name] = float(val)
         metric.reset()
     return results
+
+
+@torch.no_grad()
+def compute_classification_metrics_from_logits(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    num_classes: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Compute classification metrics directly from logits and targets.
+    """
+    if num_classes is None:
+        num_classes = int(logits.shape[-1])
+
+    # Build metric modules on CPU
+    metrics = build_classification_metrics(num_classes)
+
+    logits_cpu = logits.detach().to("cpu")
+    targets_cpu = targets.detach().to("cpu").long()
+
+    probs = torch.softmax(logits_cpu, dim=-1)
+    prob_metrics = {"auroc_macro", "auprc_macro", "auprc_per_class", "ece"}
+
+    for name, m in metrics.items():
+        if name in prob_metrics:
+            m.update(probs, targets_cpu)
+        else:
+            m.update(logits_cpu, targets_cpu)
+
+    return compute_metrics(metrics)

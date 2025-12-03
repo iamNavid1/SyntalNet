@@ -9,11 +9,11 @@ from models.multichannel_fusion import (
     BSC_X,
     BSXProjOnly,
     ConcatProjFusion,
-    UniformAvgFusion
+    UniformAvgFusion as MultichannelUniformAvgFusion
 )
 from models.multimodal_fusion import (
     GLR_X, 
-    UniformAvgFusion,
+    UniformAvgFusion as MultimodalUniformAvgFusion,
     GatedSumOnly,
     PairwiseOnly,
     ConcatMLP
@@ -50,7 +50,7 @@ def multichannel_fusion(
     if variant in ("concat_proj", "bscx_concat_proj"):
         return ConcatProjFusion(Cin_list, out_dim=out_dim)
     if variant in ("uniform_avg", "bscx_uniform_avg"):
-        return UniformAvgFusion(Cin_list, out_dim=out_dim)
+        return MultichannelUniformAvgFusion(Cin_list, out_dim=out_dim)
 
     raise ValueError(
         f"Unknown BSCX variant '{variant}'"
@@ -69,7 +69,7 @@ def multimodal_fusion(
     if variant in ("glr_x", "glrx", "glr"):
         return GLR_X(num_mod=num_mod, dims_mod=dims_mod, dim_out=dim_out, **kwargs)
     if variant in ("uniform_avg", "uniform", "mean"):
-        return UniformAvgFusion(num_mod=num_mod, dims_mod=dims_mod, dim_out=dim_out, **kwargs)
+        return MultimodalUniformAvgFusion(num_mod=num_mod, dims_mod=dims_mod, dim_out=dim_out, **kwargs)
     if variant in ("gated_sum_only", "gated_sum", "sum_only"):
         return GatedSumOnly(num_mod=num_mod, dims_mod=dims_mod, dim_out=dim_out, **kwargs)
     if variant in ("pairwise_only", "pairwise", "pair_only"):

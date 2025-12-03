@@ -1,0 +1,55 @@
+# Reliability-Switch Experiment Config: UniformAvg
+# Trains UniformAvg fusion baseline on top of frozen SyntalNet encoders
+
+# Base SyntalNet checkpoint (trained on clean data)
+base_checkpoint_dir: "checkpoints/SyntalNet"
+base_config_path: "configs/SyntalNet.yaml"
+
+# Fusion variant and hyperparameters
+fusion_variant: "uniform_avg"
+fusion_kwargs:
+  use_ln: true
+
+# Reliability-switch training configuration
+reliability_training:
+  num_epochs: 30
+  p_corrupt: 0.7  # Probability of corrupting a sample
+  
+  # Corruption type mixture (should sum to ~1.0, will be normalized)
+  corruption_mix:
+    dropout: 0.4
+    noise: 0.4
+    shuffle: 0.2
+  
+  # Corruption parameters
+  dropout_scale: 1.0      # Scale factor for modality-level dropout
+  noise_level: 0.5       # Multiplier for per-sample std
+  shuffle_fraction: 0.5   # Probability for Bernoulli mask in shuffle
+  
+  learning_rate: 5.0e-4
+  weight_decay: 0.01
+  scheduler: "reduce_on_plateau"
+  scheduler_patience: 3
+  scheduler_factor: 0.5
+  min_lr: 1.0e-5
+  validate_interval: 15
+  save_interval: 15
+
+# Stress testing configuration
+stress_test:
+  corruption_configs:
+    dropout: [0.0, 0.15, 0.30, 0.45, 0.60, 0.75]
+    noise: [0.0, 0.15, 0.30, 0.45, 0.60, 0.75]
+    shuffle: [0.0, 0.15, 0.30, 0.45, 0.60, 0.75]
+  per_modality: true
+
+# Logging and output
+logging:
+  log_dir: "logs/multimodal_fusion_reliability"
+  checkpoint_dir: "checkpoints/multimodal_fusion_reliability"
+  results_dir: "experiments/multimodal_fusion_reliability_results"
+
+# Cross-validation
+cv_mode: "kfold"
+n_folds: 5
+

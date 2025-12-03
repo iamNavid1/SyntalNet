@@ -15,8 +15,11 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 from typing import Dict, Tuple, Optional
-from models.TemporalCNN import TemporalCNN
-from models.TemporalBiLSTM import TemporalBiLSTM
+
+from engine.utils import BRANCH_MODALITY_MAP
+from models.TemporalCNN import TemporalCNN, FEATURE_DIMS as CNN_FEATURE_DIMS
+from models.TemporalBiLSTM import TemporalBiLSTM, FEATURE_DIMS as LSTM_FEATURE_DIMS
+from utils.model_stats import log_param_counts_detailed
 
 
 def count_parameters(model):
@@ -31,329 +34,159 @@ def count_parameters(model):
     return total_params, trainable_params
 
 
-def format_number(num):
-    """Format large numbers with commas and show in millions."""
-    millions = num / 1_000_000
-    return f"{num:,} ({millions:.2f}M)"
-
-
 def print_model_summary(model_name, model, config):
-    """Print a summary of the model parameters."""
+    """Print a minimal summary of the model parameters."""
     total, trainable = count_parameters(model)
-    
-    print(f"\n{'='*80}")
-    print(f"Model: {model_name}")
-    print(f"{'='*80}")
-    print(f"Configuration:")
-    for key, value in config.items():
-        print(f"  {key:25s}: {value}")
-    print(f"\nParameter Counts:")
-    print(f"  Total Parameters:      {format_number(total)}")
-    print(f"  Trainable Parameters:  {format_number(trainable)}")
-    print(f"{'='*80}")
+    print(f"{model_name}: total_params={total:,}, trainable_params={trainable:,}")
+
+
+class _StdoutLogger:
+    """Minimal logger interface for model_stats helpers."""
+
+    def info(self, msg: str, *args, **kwargs) -> None:
+        if args:
+            msg = msg % args
+        print(msg)
+
+
+def print_model_structure(model: nn.Module, max_depth: int = 3) -> None:
+    """
+    Print a compact tree of the model with parameter counts per module.
+
+    This is a lightweight wrapper around utils.model_stats.log_param_counts_detailed.
+    """
+    logger = _StdoutLogger()
+    log_param_counts_detailed(
+        model,
+        logger,
+        trainable_only=True,
+        max_depth=max_depth,
+        min_params=0,
+        topk_per_level=10,
+        include_name_regex=None,
+        exclude_name_regex=None,
+        show_leaf_shapes=False,
+        show_type=True,
+    )
+
+
+def build_dummy_batch(
+    feature_dims: Dict[str, int],
+    seq_len: int = 8,
+    batch_size: int = 1,
+    num_persons: int = 1,
+    emb_dim: int = 64,
+    device: Optional[torch.device] = None,
+) -> Dict[str, Dict[str, Tuple[torch.Tensor, torch.Tensor]]]:
+    """
+    Build a minimal dummy batch that matches the expected input structure
+    for TemporalCNN / TemporalBiLSTM so that all lazy submodules are built.
+    """
+    if device is None:
+        device = torch.device("cpu")
+
+    B, P, T = batch_size, num_persons, seq_len
+    batch_data: Dict[str, Dict[str, Tuple[torch.Tensor, torch.Tensor]]] = {}
+
+    for branch, spec in BRANCH_MODALITY_MAP.items():
+        mod_dict: Dict[str, Tuple[torch.Tensor, torch.Tensor]] = {}
+
+        # Feature modalities (use real feature dimensions)
+        for modality in spec["feat"]:
+            dim = feature_dims[modality]
+            x = torch.randn(B, P, T, dim, device=device)
+            m = torch.ones(B, P, T, 1, device=device)
+            mod_dict[modality] = (x, m)
+
+        # Embedding modality (dimension is arbitrary but fixed)
+        emb_mod = spec["emb"]
+        x_emb = torch.randn(B, P, T, emb_dim, device=device)
+        m_emb = torch.ones(B, P, T, 1, device=device)
+        mod_dict[emb_mod] = (x_emb, m_emb)
+
+        batch_data[branch] = mod_dict
+
+    return batch_data
 
 
 def explore_lstm_sizes():
-    """Explore different LSTM model sizes."""
-    print("\n" + "="*80)
-    print(" TEMPORAL BiLSTM MODEL - PARAMETER EXPLORATION")
-    print("="*80)
-    
-    # Configuration sets: from baseline to massive
-    configs = {
-        "Baseline (Default)": {
-            "hidden_size": 128,
-            "num_lstm_layers": 2,
-            "classifier_hidden": 128,
-            "dropout": 0.2,
-            "bidirectional": True,
-        },
-        "Medium": {
-            "hidden_size": 256,
-            "num_lstm_layers": 3,
-            "classifier_hidden": 256,
-            "dropout": 0.2,
-            "bidirectional": True,
-        },
-        "Large": {
-            "hidden_size": 512,
-            "num_lstm_layers": 4,
-            "classifier_hidden": 512,
-            "dropout": 0.2,
-            "bidirectional": True,
-        },
-        "Extra Large": {
-            "hidden_size": 1024,
-            "num_lstm_layers": 5,
-            "classifier_hidden": 1024,
-            "dropout": 0.2,
-            "bidirectional": True,
-        },
-        "Massive": {
-            "hidden_size": 2048,
-            "num_lstm_layers": 6,
-            "classifier_hidden": 2048,
-            "dropout": 0.2,
-            "bidirectional": True,
-        },
-        "Ultra Massive": {
-            "hidden_size": 4096,
-            "num_lstm_layers": 8,
-            "classifier_hidden": 4096,
-            "dropout": 0.2,
-            "bidirectional": True,
-        },
-    }
-    
-    results = {}
-    for name, config in configs.items():
-        try:
-            model = TemporalBiLSTM(
-                hidden_size=config["hidden_size"],
-                num_lstm_layers=config["num_lstm_layers"],
-                dropout=config["dropout"],
-                bidirectional=config["bidirectional"],
-                ind_cls_heads=("Engagement", "Lead"),
-                grp_cls_heads=("Synchrony", "Confidence", "Transition"),
-                classifier_hidden=config["classifier_hidden"],
-            )
-            print_model_summary(f"BiLSTM - {name}", model, config)
-            total, _ = count_parameters(model)
-            results[name] = total
-        except Exception as e:
-            print(f"\n[ERROR] Failed to create {name} configuration: {e}")
-    
-    # Print comparison
-    print("\n" + "="*80)
-    print(" PARAMETER COUNT COMPARISON")
-    print("="*80)
-    baseline = results.get("Baseline (Default)", 1)
-    for name, total in results.items():
-        increase = (total / baseline - 1) * 100
-        print(f"{name:20s}: {format_number(total):>25s} ({increase:>7.1f}% increase)")
-    
-    return results
-
-
-def explore_cnn_sizes():
-    """Explore different CNN model sizes."""
-    print("\n" + "="*80)
-    print(" TEMPORAL CNN MODEL - PARAMETER EXPLORATION")
-    print("="*80)
-    
-    # Configuration sets: from baseline to massive
-    configs = {
-        "Baseline (Default)": {
-            "hidden_size": 128,
-            "num_cnn_layers": 3,
-            "kernel_size": 3,
-            "classifier_hidden": 128,
-            "dropout": 0.2,
-        },
-        "Medium": {
-            "hidden_size": 256,
-            "num_cnn_layers": 4,
-            "kernel_size": 5,
-            "classifier_hidden": 256,
-            "dropout": 0.2,
-        },
-        "Large": {
-            "hidden_size": 512,
-            "num_cnn_layers": 6,
-            "kernel_size": 7,
-            "classifier_hidden": 512,
-            "dropout": 0.2,
-        },
-        "Extra Large": {
-            "hidden_size": 1024,
-            "num_cnn_layers": 8,
-            "kernel_size": 9,
-            "classifier_hidden": 1024,
-            "dropout": 0.2,
-        },
-        "Massive": {
-            "hidden_size": 2048,
-            "num_cnn_layers": 10,
-            "kernel_size": 11,
-            "classifier_hidden": 2048,
-            "dropout": 0.2,
-        },
-        "Ultra Massive": {
-            "hidden_size": 4096,
-            "num_cnn_layers": 12,
-            "kernel_size": 15,
-            "classifier_hidden": 4096,
-            "dropout": 0.2,
-        },
-    }
-    
-    results = {}
-    for name, config in configs.items():
-        try:
-            model = TemporalCNN(
-                hidden_size=config["hidden_size"],
-                num_cnn_layers=config["num_cnn_layers"],
-                kernel_size=config["kernel_size"],
-                dropout=config["dropout"],
-                ind_cls_heads=("Engagement", "Lead"),
-                grp_cls_heads=("Synchrony", "Confidence", "Transition"),
-                classifier_hidden=config["classifier_hidden"],
-            )
-            print_model_summary(f"CNN - {name}", model, config)
-            total, _ = count_parameters(model)
-            results[name] = total
-        except Exception as e:
-            print(f"\n[ERROR] Failed to create {name} configuration: {e}")
-    
-    # Print comparison
-    print("\n" + "="*80)
-    print(" PARAMETER COUNT COMPARISON")
-    print("="*80)
-    baseline = results.get("Baseline (Default)", 1)
-    for name, total in results.items():
-        increase = (total / baseline - 1) * 100
-        print(f"{name:20s}: {format_number(total):>25s} ({increase:>7.1f}% increase)")
-    
-    return results
-
-
-def custom_model_builder():
-    """Interactive section to build custom-sized models."""
-    print("\n" + "="*80)
-    print(" CUSTOM MODEL BUILDER")
-    print("="*80)
-    print("\nYou can modify the parameters below to create custom models:")
-    print("\nFor BiLSTM, key parameters are:")
-    print("  - hidden_size: Size of hidden states (affects most params)")
-    print("  - num_lstm_layers: Number of LSTM layers")
-    print("  - classifier_hidden: Hidden size of classifier MLPs")
-    print("\nFor CNN, key parameters are:")
-    print("  - hidden_size: Number of channels (affects most params)")
-    print("  - num_cnn_layers: Number of convolutional layers")
-    print("  - kernel_size: Size of convolution kernels")
-    print("  - classifier_hidden: Hidden size of classifier MLPs")
-    
-    # Example: Create extreme models
-    print("\n" + "-"*80)
-    print(" EXTREME CONFIGURATION EXAMPLES")
-    print("-"*80)
-    
-    # Extreme BiLSTM
-    print("\n[1] Extreme BiLSTM (pushing limits):")
-    extreme_lstm_config = {
-        "hidden_size": 8192,
-        "num_lstm_layers": 10,
-        "classifier_hidden": 8192,
+    """Create a single BiLSTM with default-style hyperparameters and report params."""
+    config = {
+        "hidden_size": 96,
+        "num_lstm_layers": 1,
+        "classifier_hidden": 96,
         "dropout": 0.2,
         "bidirectional": True,
     }
+
     try:
-        extreme_lstm = TemporalBiLSTM(**extreme_lstm_config,
-                                      ind_cls_heads=("Engagement", "Lead"),
-                                      grp_cls_heads=("Synchrony", "Confidence", "Transition"))
-        print_model_summary("Extreme BiLSTM", extreme_lstm, extreme_lstm_config)
+        model = TemporalBiLSTM(
+            hidden_size=config["hidden_size"],
+            num_lstm_layers=config["num_lstm_layers"],
+            dropout=config["dropout"],
+            bidirectional=config["bidirectional"],
+            ind_cls_heads=("Engagement", "Lead"),
+            grp_cls_heads=("Synchrony", "Confidence", "Transition"),
+            classifier_hidden=config["classifier_hidden"],
+        )
+
+        # Run a dummy forward pass so that all lazy LSTM encoders are built
+        dummy_batch = build_dummy_batch(LSTM_FEATURE_DIMS)
+        with torch.no_grad():
+            model(dummy_batch)
+
+        print_model_summary("BiLSTM (default)", model, config)
+        # print("\nBiLSTM structure (truncated):")
+        # print_model_structure(model, max_depth=3)
+        total, _ = count_parameters(model)
+        return {"Baseline (Default)": total}
     except Exception as e:
-        print(f"[ERROR] Could not create extreme BiLSTM: {e}")
-    
-    # Extreme CNN
-    print("\n[2] Extreme CNN (pushing limits):")
-    extreme_cnn_config = {
-        "hidden_size": 8192,
-        "num_cnn_layers": 15,
-        "kernel_size": 21,
-        "classifier_hidden": 8192,
+        print(f"[ERROR] Failed to create BiLSTM default configuration: {e}")
+        return {}
+
+
+def explore_cnn_sizes():
+    """Create a single CNN with default-style hyperparameters and report params."""
+    config = {
+        "hidden_size": 128,
+        "num_cnn_layers": 3,
+        "kernel_size": 3,
+        "classifier_hidden": 128,
         "dropout": 0.2,
     }
+
     try:
-        extreme_cnn = TemporalCNN(**extreme_cnn_config,
-                                   ind_cls_heads=("Engagement", "Lead"),
-                                   grp_cls_heads=("Synchrony", "Confidence", "Transition"))
-        print_model_summary("Extreme CNN", extreme_cnn, extreme_cnn_config)
+        model = TemporalCNN(
+            hidden_size=config["hidden_size"],
+            num_cnn_layers=config["num_cnn_layers"],
+            kernel_size=config["kernel_size"],
+            dropout=config["dropout"],
+            ind_cls_heads=("Engagement", "Lead"),
+            grp_cls_heads=("Synchrony", "Confidence", "Transition"),
+            classifier_hidden=config["classifier_hidden"],
+        )
+
+        # Run a dummy forward pass so that all lazy CNN encoders are built
+        dummy_batch = build_dummy_batch(CNN_FEATURE_DIMS)
+        with torch.no_grad():
+            model(dummy_batch)
+
+        print_model_summary("CNN (default)", model, config)
+        # print("\nCNN structure (truncated):")
+        # print_model_structure(model, max_depth=3)
+        total, _ = count_parameters(model)
+        return {"Baseline (Default)": total}
     except Exception as e:
-        print(f"[ERROR] Could not create extreme CNN: {e}")
+        print(f"[ERROR] Failed to create CNN default configuration: {e}")
+        return {}
 
-
-def analyze_parameter_distribution(model, model_name):
-    """Analyze where parameters are distributed in the model."""
-    print(f"\n{'='*80}")
-    print(f"Parameter Distribution Analysis: {model_name}")
-    print(f"{'='*80}")
-    
-    module_params = {}
-    for name, module in model.named_children():
-        params = sum(p.numel() for p in module.parameters())
-        if params > 0:
-            module_params[name] = params
-    
-    total = sum(module_params.values())
-    
-    print(f"\n{'Module':<30s} {'Parameters':>20s} {'Percentage':>15s}")
-    print("-" * 80)
-    for name, params in sorted(module_params.items(), key=lambda x: x[1], reverse=True):
-        percentage = (params / total) * 100 if total > 0 else 0
-        print(f"{name:<30s} {format_number(params):>20s} {percentage:>14.2f}%")
-    print("-" * 80)
-    print(f"{'TOTAL':<30s} {format_number(total):>20s} {'100.00':>14s}%")
 
 
 def main():
-    """Main function to run all explorations."""
-    print("\n" + "█"*80)
-    print("█" + " "*78 + "█")
-    print("█" + " "*20 + "MODEL PARAMETER EXPLORER" + " "*35 + "█")
-    print("█" + " "*78 + "█")
-    print("█"*80)
-    
-    # Explore LSTM sizes
-    lstm_results = explore_lstm_sizes()
-    
-    # Explore CNN sizes
-    cnn_results = explore_cnn_sizes()
-    
-    # Custom model builder with extreme examples
-    custom_model_builder()
-    
-    # Detailed analysis on baseline models
-    print("\n" + "="*80)
-    print(" DETAILED PARAMETER DISTRIBUTION ANALYSIS")
-    print("="*80)
-    
-    baseline_lstm = TemporalBiLSTM(
-        hidden_size=128,
-        num_lstm_layers=2,
-        dropout=0.2,
-        bidirectional=True,
-        ind_cls_heads=("Engagement", "Lead"),
-        grp_cls_heads=("Synchrony", "Confidence", "Transition"),
-        classifier_hidden=128,
-    )
-    analyze_parameter_distribution(baseline_lstm, "Baseline BiLSTM")
-    
-    baseline_cnn = TemporalCNN(
-        hidden_size=128,
-        num_cnn_layers=3,
-        kernel_size=3,
-        dropout=0.2,
-        ind_cls_heads=("Engagement", "Lead"),
-        grp_cls_heads=("Synchrony", "Confidence", "Transition"),
-        classifier_hidden=128,
-    )
-    analyze_parameter_distribution(baseline_cnn, "Baseline CNN")
-    
-    # Summary
-    print("\n" + "█"*80)
-    print("█" + " "*78 + "█")
-    print("█" + " "*30 + "SUMMARY" + " "*42 + "█")
-    print("█" + " "*78 + "█")
-    print("█"*80)
-    print("\nKey findings:")
-    print("  1. Input dimensions remain the same across all configurations")
-    print("  2. Parameter count scales quadratically with hidden_size")
-    print("  3. BiLSTM parameters grow faster than CNN due to recurrent connections")
-    print("  4. Largest practical models (8192 hidden size) have 500M-1B+ parameters")
-    print("\nTo create your own configuration, modify the parameters in custom_model_builder()")
-    print("or directly instantiate models with desired hyperparameters.")
-    print("\n" + "█"*80 + "\n")
+    """Main function to run parameter counts for default models."""
+    print("\nModel parameter counts (default configurations):")
+    explore_lstm_sizes()
+    explore_cnn_sizes()
 
 
 if __name__ == "__main__":
