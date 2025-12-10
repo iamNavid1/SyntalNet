@@ -7,8 +7,8 @@ import torch
 import torch.nn as nn
 
 import models.builders as build
-from experiments.multimodal_reliability.augmentations import ReliabilitySwitchAugmentor
-from experiments.multimodal_reliability.config import (
+from experiments.multimodal_fusion.augmentations import ReliabilitySwitchAugmentor
+from experiments.multimodal_fusion.config import (
     ExperimentConfig,
     FusionVariantConfig,
     ReliabilityAugmentationConfig,

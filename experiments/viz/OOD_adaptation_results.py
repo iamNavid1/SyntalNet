@@ -29,7 +29,7 @@ CONSTRUCTS = [
 
 # Data proportions for Experiment 1
 EXP1_PROPORTIONS = [0.0, 0.05, 0.10, 0.15, 0.20, 0.25]
-EXP1_LABELS = ["Zero-shot", "5%", "10%", "15%", "20%", "25%"]
+EXP1_LABELS = ["Zero-shot", "5% target labels", "10% target labels", "15% target labels", "20% target labels", "25% target labels"]
 
 # Data proportions and epochs for Experiment 2
 EXP2_PROPORTIONS = [0.05, 0.10, 0.15, 0.20, 0.25]
@@ -338,7 +338,8 @@ def plot_experiment_1(ax, data: Dict):
     
     # Styling
     ax.set_ylabel("AUPRC (macro)", fontsize=11, color='#2C2C2C', weight='bold')
-    ax.set_title("Experiment 1: Data-Portion Sweep", pad=10, fontsize=13, weight='bold', color='#1A1A1A')
+    ax.set_title("Few-Shot Target-Group Adaptation: Varying Labeled Fraction", pad=10, fontsize=13, weight='bold', color='#1A1A1A')
+    ax.set_xlabel("Construct", fontsize=11, color='#2C2C2C', weight='bold')
     ax.set_xticks(group_centers)
     ax.set_xticklabels([c["short"] for c in CONSTRUCTS], fontsize=10, color='#2C2C2C')
     ax.set_ylim(0.30, 0.55)
@@ -380,7 +381,7 @@ def plot_experiment_2(ax, data: Dict):
         means = proportion_data["means"]
         
         color = COLORS[proportion]
-        label = f"{int(proportion * 100)}%"
+        label = f"{int(proportion * 100)}% target labels"
         
         # Plot line
         ax.plot(epochs, means, color=color, linewidth=2.5, marker='o', markersize=6,
@@ -388,10 +389,10 @@ def plot_experiment_2(ax, data: Dict):
     
     # Styling
     ax.set_ylabel("AUPRC (macro)\n(averaged over constructs)", fontsize=11, color='#2C2C2C', weight='bold')
-    ax.set_xlabel("Epoch", fontsize=11, color='#2C2C2C', weight='bold')
-    ax.set_title("Experiment 2: Epoch Sweep", pad=10, fontsize=13, weight='bold', color='#1A1A1A')
+    ax.set_xlabel("Epoch of adaptation on target group", fontsize=11, color='#2C2C2C', weight='bold')
+    ax.set_title("Effect of Adaptation Training Duration", pad=10, fontsize=13, weight='bold', color='#1A1A1A')
     ax.set_xticks([0] + EXP2_EPOCHS)
-    ax.set_xticklabels(["0\n(Zero-shot)"] + [str(e) for e in EXP2_EPOCHS], fontsize=10, color='#2C2C2C')
+    ax.set_xticklabels(["0"] + [str(e) for e in EXP2_EPOCHS], fontsize=10, color='#2C2C2C')
     ax.set_ylim(0.35, 0.50)
     ax.yaxis.grid(True, linestyle=':', linewidth=0.8, alpha=0.7, color='#BFC7D5', zorder=1)
     ax.xaxis.grid(True, linestyle=':', linewidth=0.5, alpha=0.5, color='#E0E0E0', zorder=1)
@@ -450,7 +451,8 @@ def plot_experiment_3(ax, data: Dict):
     
     # Styling
     ax.set_ylabel("AUPRC (macro)", fontsize=11, color='#2C2C2C', weight='bold')
-    ax.set_title("Experiment 3: Frozen Backbone (Item Split)", pad=10, fontsize=13, weight='bold', color='#1A1A1A')
+    ax.set_title("Head-Only Adaptation with Frozen Encoder", pad=10, fontsize=13, weight='bold', color='#1A1A1A')
+    ax.set_xlabel("Construct", fontsize=11, color='#2C2C2C', weight='bold')
     ax.set_xticks(group_centers)
     ax.set_xticklabels([c["short"] for c in CONSTRUCTS], fontsize=10, color='#2C2C2C')
     ax.set_ylim(0.30, 0.70)
@@ -528,7 +530,7 @@ def create_visualization(
         Patch(facecolor=COLORS[0.0], edgecolor='none'),
         Patch(facecolor="#E8684A", edgecolor='none')
     ]
-    labels_exp3 = ["Zero-shot", "Frozen Backbone (80% train)"]
+    labels_exp3 = ["Zero-shot", "Head-only adaptation (80% target labels)"]
     axes[2].legend(handles_exp3, labels_exp3, loc='upper left', frameon=False, fontsize=9)
     
     plt.subplots_adjust(left=0.04, right=0.995, top=0.90, bottom=0.12, wspace=0.25)

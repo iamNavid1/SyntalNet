@@ -1,33 +1,30 @@
 """
-GLRX Ablation Results Visualization
+Reliability-Switch Multimodal Fusion Results Visualization
 
-This script visualizes stress test results from multimodal_fusion/runner.py.
+This script visualizes stress-test results from
+`experiments/multimodal_reliability`, using the same aesthetics and
+aggregation logic as `GLRX_ablation_results.py`.
 
-Usage Examples:
-
-1. Per-fold visualization:
-   python experiments/viz/GLRX_ablation_results.py \
-       --csv experiments/multimodal_fusion_results/multimodal_fusion_results_per_fold.csv \
-       --aggregation-level per_fold \
-       --outdir experiments/viz_results/glrx
-
-2. Aggregated visualization:
-   python experiments/viz/GLRX_ablation_results.py \
-       --csv experiments/multimodal_fusion_results/multimodal_fusion_results_aggregated.csv \
-       --aggregation-level aggregated \
-       --outdir experiments/viz_results/glrx
+- Three panels: Modality Dropout | Modality Noise | Modality Shuffle
+- X-axis: corruption_param
+- Y-axis: F1 (macro), aggregated over constructs and shown per corruption_type
+- One line per fusion variant (GLR-X, UniformAvg, ConcatMLP, ...)
 """
+
+from __future__ import annotations
 
 import os
 import argparse
+from pathlib import Path
 from typing import Optional, List, Dict
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+
 # ------------------------------------------------------------------
-# Global style 
+# Global style  (copied from GLRX_ablation_results.py)
 # ------------------------------------------------------------------
 plt.rcParams.update({
     "font.family": "DejaVu Sans",
@@ -42,103 +39,189 @@ plt.rcParams.update({
     "axes.linewidth": 1.2,
 })
 
-# Same palette as the reference code
 PALETTE = ["#5B8FF9", "#61DDAA", "#65789B", "#F6BD16", "#FF6B6B"]
 
-# Explicit overrides for key variants (case-insensitive)
 COLOR_OVERRIDES = {
     "glrx": "#F6BD16",        # golden
     "glr_x": "#F6BD16",       # golden
     "concat_mlp": "#61DDAA",  # green
     "uniform_avg": "#5B8FF9", # blue
-    "gated_sum": "#65789B",   # gray-blue
-    "pairwise": "#FF6B6B",    # red
 }
 
-# Mapping from model variant names to display names for legend
 VARIANT_DISPLAY_NAMES = {
     "glrx": "GLR-X",
     "glr_x": "GLR-X",
     "uniform_avg": "Mean Pooling",
-    "gated_sum": "Gated Sum",
-    "pairwise": "Pairwise",
     "concat_mlp": "Concat + MLP",
 }
 
 
 def get_display_name(variant_name: str) -> str:
-    """Get display name for a model variant, with fallback to original name."""
     key = variant_name.lower().strip()
     return VARIANT_DISPLAY_NAMES.get(key, variant_name)
 
 
-def compute_ylim(values, margin_low=0.03, margin_high=0.03):
-    values = np.asarray(values, dtype=float)
-    vmin, vmax = float(values.min()), float(values.max())
-    
-    # Calculate data range
-    data_range = vmax - vmin
-    
-    # Use adaptive margins: smaller margins for larger ranges, but ensure minimum padding
-    if data_range > 0:
-        # Use 2-3% of data range as margin, but at least 0.01
-        adaptive_margin = max(0.01, data_range * 0.02)
-        margin_low = min(margin_low, adaptive_margin)
-        margin_high = min(margin_high, adaptive_margin)
-    
-    lo = max(0.0, vmin - margin_low)
-    hi = min(1.0, vmax + margin_high)
-    
-    # Use finer rounding (0.01 increments instead of 0.05) for better precision
-    lo = np.floor(lo * 100) / 100.0
-    hi = np.ceil(hi * 100) / 100.0
-    
-    # Ensure minimum range, but use a smaller minimum if data range is small
-    min_range = max(0.10, data_range * 1.1)  # At least 10% more than data range
-    if hi - lo < min_range:
-        # Center the range around the data
-        center = (vmin + vmax) / 2.0
-        lo = max(0.0, center - min_range / 2.0)
-        hi = min(1.0, center + min_range / 2.0)
-        # Re-round
-        lo = np.floor(lo * 100) / 100.0
-        hi = np.ceil(hi * 100) / 100.0
-    
-    return lo, hi
+def format_metric_name(metric_name: str) -> str:
+    """Format metric name for display."""
+    metric_lower = metric_name.lower().strip()
+    metric_map = {
+        "accuracy": "Accuracy",
+        "f1_macro": "F1 Score",
+        "f1_micro": "F1 Score",
+        "f1": "F1 Score",
+        "auprc": "AUPRC",
+        "auroc": "AUROC",
+    }
+    return metric_map.get(metric_lower, metric_name.replace("_", " ").title())
 
+
+# ------------------------------------------------------------------
+# Data loading / aggregation
+# ------------------------------------------------------------------
+
+def collect_stress_results(
+    root_dir: str,
+    variants: Optional[List[str]] = None,
+) -> pd.DataFrame:
+    """
+    Load and concatenate per-fold stress_tests.csv for all variants.
+
+    Expected layout:
+      root_dir/
+        <cv_mode>/          e.g. kfold
+          <variant>/
+            fold_00/results/stress_tests.csv
+            fold_01/results/stress_tests.csv
+            ...
+    """
+    root = Path(root_dir).resolve()
+
+    # Allow passing root at results root or cv_mode level
+    cv_dirs: List[Path] = []
+    if any(p.is_dir() and p.name in {"kfold", "logo"} for p in root.iterdir()):
+        for p in root.iterdir():
+            if p.is_dir() and p.name in {"kfold", "logo"}:
+                cv_dirs.append(p)
+    else:
+        cv_dirs.append(root)
+
+    records: List[pd.DataFrame] = []
+
+    for cv_dir in cv_dirs:
+        for variant_dir in cv_dir.iterdir():
+            if not variant_dir.is_dir():
+                continue
+            variant_name = variant_dir.name
+            if variants is not None and variant_name not in variants:
+                continue
+
+            for fold_dir in variant_dir.iterdir():
+                if not fold_dir.is_dir() or not fold_dir.name.startswith("fold_"):
+                    continue
+                results_dir = fold_dir / "results"
+                csv_path = results_dir / "stress_tests.csv"
+                if not csv_path.is_file():
+                    continue
+                df = pd.read_csv(csv_path)
+                df["variant"] = variant_name
+                df["fold"] = fold_dir.name
+                records.append(df)
+
+    if not records:
+        raise FileNotFoundError(f"No stress_tests.csv found under {root_dir}")
+
+    all_df = pd.concat(records, ignore_index=True)
+    return all_df
+
+
+def build_per_fold_f1_df(
+    df: pd.DataFrame,
+    split_filter: Optional[str] = "group",
+    modality_filter: Optional[str] = "random_single",
+    metric_name: str = "f1_macro",
+) -> pd.DataFrame:
+    """
+    Construct a per-fold DataFrame with the same schema expected by
+    GLRX_ablation_results.plot_corruption_trends:
+
+      - model_variant
+      - metric
+      - value
+      - fold
+      - corruption_type
+      - corruption_param
+
+    Here, `value` is F1-macro averaged across all heads (constructs) for a given
+    (variant, fold, corruption_type, corruption_param).
+    """
+    df = df.copy()
+
+    # split_filter: "individual", "group", or "all"/None
+    if split_filter is not None and split_filter != "all":
+        df = df[df["split"] == split_filter]
+    if modality_filter is not None:
+        df = df[df["modality"] == modality_filter]
+
+    if df.empty:
+        raise ValueError("No rows left after filtering by split/modality.")
+
+    df["corruption_param"] = pd.to_numeric(df["corruption_param"], errors="coerce")
+    df[metric_name] = pd.to_numeric(df[metric_name], errors="coerce")
+    df = df.dropna(subset=["corruption_param", metric_name])
+
+    # Aggregate over heads (constructs) within each fold
+    grp = (
+        df.groupby(
+            ["variant", "fold", "corruption_type", "corruption_param"],
+            as_index=False,
+        )[metric_name]
+        .mean()
+        .rename(columns={metric_name: "value"})
+    )
+
+    # Rename columns to match GLRX plotting expectations
+    grp = grp.rename(columns={"variant": "model_variant"})
+    grp["metric"] = metric_name
+
+    # Remember which split regime this aggregation corresponds to so that
+    # plotting code can generate an informative y-axis label.
+    # For split_filter == "all", we explicitly tag as "all".
+    split_label = split_filter if split_filter is not None else "all"
+    grp["split"] = split_label
+
+    # Per-fold style; no precomputed mean/std columns here
+    return grp[
+        [
+            "model_variant",
+            "metric",
+            "value",
+            "fold",
+            "corruption_type",
+            "corruption_param",
+            "split",
+        ]
+    ]
+
+
+# ------------------------------------------------------------------
+# Plotting (adapted from GLRX_ablation_results.plot_corruption_trends)
+# ------------------------------------------------------------------
 
 def plot_corruption_trends(
-    csv_path: str,
+    df: pd.DataFrame,
     output_dir: str,
-    only_variants: Optional[List[str]] = None,
     metric_name: str = "f1_macro",
     show: bool = False,
-    fit_line: bool = False,
-    aggregation_level: str = "per_fold",
-    split_filter: Optional[str] = None,
-    head_filter: Optional[str] = None,
-):
+) -> None:
     """
-    Creates a single figure with up to 4 horizontally stacked subplots:
-        Modality Dropout | Modality Noise | Modality Shuffle | Modality Rescale
+    Match GLRX_ablation_results: 3 horizontally stacked subplots
+      Modality Dropout | Modality Noise | Modality Shuffle
 
-    Each subplot:
-      - X-axis: corruption_param (with specific tick sets per corruption type)
-      - Y-axis: metric_name
-      - One line per model_variant:
-          * For per_fold: Transparent per-fold points + means
-          * For aggregated: Mean ± std error bars or just means
-
-    Args:
-        csv_path: Path to CSV file (per_fold or aggregated)
-        aggregation_level: "per_fold" or "aggregated"
-        split_filter: Filter by split (e.g., "individual", "group", or None for all)
-        head_filter: Filter by head (construct name, or None for all)
+    Per-fold visualization style:
+      - Transparent per-fold points
+      - Mean line across folds, with optional error bars
     """
-
     os.makedirs(output_dir, exist_ok=True)
-
-    df = pd.read_csv(csv_path)
 
     # Filter by metric
     df = df[df["metric"] == metric_name].copy()
@@ -146,52 +229,17 @@ def plot_corruption_trends(
         print(f"No rows with metric == '{metric_name}'.")
         return
 
-    # Optional: filter variants
-    if only_variants is not None:
-        only_variants = [v.strip() for v in only_variants if v.strip()]
-        df = df[df["model_variant"].isin(only_variants)].copy()
-        if df.empty:
-            print("No rows left after filtering by model_variant.")
-            return
-
-    # Filter by split if specified
-    if split_filter is not None:
-        df = df[df["split"] == split_filter].copy()
-        if df.empty:
-            print(f"No rows left after filtering by split='{split_filter}'.")
-            return
-
-    # Filter by head if specified
-    if head_filter is not None:
-        df = df[df["head"] == head_filter].copy()
-        if df.empty:
-            print(f"No rows left after filtering by head='{head_filter}'.")
-            return
-
     # Numeric corruption_param
     df["corruption_param"] = pd.to_numeric(df["corruption_param"], errors="coerce")
     df = df.dropna(subset=["corruption_param"])
 
-    # Determine if we have aggregated data (mean column) or per-fold data (value column)
-    has_mean = "mean" in df.columns
-    has_value = "value" in df.columns
-    
-    if has_mean:
-        # Use mean from aggregated data
-        df["plot_value"] = pd.to_numeric(df["mean"], errors="coerce")
-        has_std = "std" in df.columns
-        if has_std:
-            df["plot_std"] = pd.to_numeric(df["std"], errors="coerce")
-    elif has_value:
-        # Use value from per-fold data
-        df["plot_value"] = pd.to_numeric(df["value"], errors="coerce")
-        has_std = False
-    else:
-        print("CSV must contain either 'mean' (aggregated) or 'value' (per-fold) column.")
+    # Determine that we have per-fold data (value column)
+    if "value" not in df.columns:
+        print("Input must contain 'value' column for per-fold results.")
         return
 
+    df["plot_value"] = pd.to_numeric(df["value"], errors="coerce")
     df = df.dropna(subset=["plot_value"])
-
     if df.empty:
         print("No valid rows after cleaning corruption_param/plot_value.")
         return
@@ -212,7 +260,7 @@ def plot_corruption_trends(
         corr_norm_map[orig] = norm
 
     # Determine which corruption_type maps to which logical panel
-    panel_kinds = ["dropout", "noise", "shuffle", "rescale"]
+    panel_kinds = ["dropout", "noise", "shuffle"]
     ordered_corr_info = []  # list of (kind, orig_corr_type)
 
     for kind in panel_kinds:
@@ -227,22 +275,20 @@ def plot_corruption_trends(
             elif kind == "shuffle" and "shuffle" in norm:
                 found_type = orig
                 break
-            elif kind == "rescale" and "rescale" in norm:
-                found_type = orig
-                break
         if found_type is not None:
             ordered_corr_info.append((kind, found_type))
 
     if not ordered_corr_info:
-        print("No recognized corruption_types (dropout/noise/shuffle/rescale) found in CSV.")
+        print("No recognized corruption_types (dropout/noise/shuffle) found in CSV.")
         return
 
     n_panels = len(ordered_corr_info)
 
-    # Figure + layout (no shared y-range: each subplot gets its own)
+    # Figure + layout
     fig, axes = plt.subplots(
-        1, n_panels,
-        figsize=(20, 3.6) if n_panels == 4 else (16, 3.6),
+        1,
+        n_panels,
+        figsize=(20, 3.6) if n_panels == 3 else (16, 3.6),
         sharey=False,
     )
     if n_panels == 1:
@@ -262,26 +308,23 @@ def plot_corruption_trends(
             color_map[mv] = PALETTE[palette_index % len(PALETTE)]
             palette_index += 1
 
-    # For collecting legend handles only once
     handles_for_legend = []
     labels_for_legend = []
 
-    # ------------------------------------------------------------------
     # Plot each corruption type into its panel
-    # ------------------------------------------------------------------
     for ax, (kind, corr_type) in zip(axes, ordered_corr_info):
         df_corr = df[df["corruption_type"] == corr_type].copy()
         if df_corr.empty:
             continue
 
-        # Panel background like the bar plots
+        # Panel background
         ax.set_facecolor("#F4F6FA")
         ax.set_axisbelow(True)
 
         for mv, df_mv in df_corr.groupby("model_variant"):
             col = color_map[mv]
 
-            # Group by corruption_param and compute means
+            # Group by corruption_param and compute means across folds
             grouped = df_mv.groupby("corruption_param")
             xs_means = []
             ys_means = []
@@ -290,10 +333,7 @@ def plot_corruption_trends(
             for cp, df_cp in grouped:
                 xs_means.append(float(cp))
                 ys_means.append(float(df_cp["plot_value"].mean()))
-                if has_std and "plot_std" in df_cp.columns:
-                    ys_stds.append(float(df_cp["plot_std"].mean()))
-                else:
-                    ys_stds.append(0.0)
+                ys_stds.append(float(df_cp["plot_value"].std(ddof=0)))
 
             xs_means = np.asarray(xs_means, dtype=float)
             ys_means = np.asarray(ys_means, dtype=float)
@@ -308,93 +348,44 @@ def plot_corruption_trends(
             ys_means = ys_means[order]
             ys_stds = ys_stds[order]
 
-            # Get display name for this variant
             display_name = get_display_name(mv)
 
-            # For per-fold data, also show individual fold points
-            if has_value and "fold" in df_mv.columns:
-                # Show per-fold scatter points
-                for cp in sorted(df_mv["corruption_param"].unique()):
-                    df_cp = df_mv[df_mv["corruption_param"] == cp]
-                    fold_vals = df_cp["plot_value"].values
-                    ax.scatter(
-                        [cp] * len(fold_vals),
-                        fold_vals,
-                        color=col,
-                        alpha=0.25,
-                        s=30,
-                        edgecolors="none",
-                        zorder=2,
-                    )
-
-            if fit_line:
-                # Polynomial fit (no solid mean circles)
-                if len(xs_means) >= 2:
-                    deg = min(2, len(xs_means) - 1)
-                    coeffs = np.polyfit(xs_means, ys_means, deg=deg)
-                    poly = np.poly1d(coeffs)
-
-                    x_smooth = np.linspace(xs_means.min(), xs_means.max(), 200)
-                    y_smooth = poly(x_smooth)
-
-                    line = ax.plot(
-                        x_smooth,
-                        y_smooth,
-                        color=col,
-                        linestyle="-",
-                        linewidth=2.0,
-                        label=display_name,
-                        zorder=3,
-                    )[0]
-                else:
-                    # Single point: just show its mean as a marker (no line)
-                    line = ax.scatter(
-                        xs_means,
-                        ys_means,
-                        color=col,
-                        alpha=0.95,
-                        s=55,
-                        edgecolors="white",
-                        linewidths=0.6,
-                        label=display_name,
-                        zorder=4,
-                    )
-            else:
-                # Straight line connection between mean points + solid mean circles
-                line = ax.plot(
+            # Straight line connection between mean points + solid mean circles
+            line = ax.plot(
+                xs_means,
+                ys_means,
+                color=col,
+                linestyle="-",
+                linewidth=2.0,
+                label=display_name,
+                zorder=3,
+            )[0]
+            ax.scatter(
+                xs_means,
+                ys_means,
+                color=col,
+                alpha=0.98,
+                s=55,
+                edgecolors="white",
+                linewidths=0.6,
+                zorder=4,
+            )
+            # Error bars if we have std
+            if np.any(ys_stds > 0):
+                ax.errorbar(
                     xs_means,
                     ys_means,
-                    color=col,
-                    linestyle="-",
-                    linewidth=2.0,
-                    label=display_name,
-                    zorder=3,
-                )[0]
-                ax.scatter(
-                    xs_means,
-                    ys_means,
-                    color=col,
-                    alpha=0.98,
-                    s=55,
-                    edgecolors="white",
-                    linewidths=0.6,
-                    zorder=4,
+                    yerr=ys_stds,
+                    fmt="none",
+                    marker=None,
+                    ecolor=col,
+                    alpha=0.4,
+                    linewidth=0.8,
+                    capsize=4,
+                    capthick=0.8,
+                    zorder=1,
                 )
-                # Optionally show error bars if we have std
-                if has_std and np.any(ys_stds > 0):
-                    ax.errorbar(
-                        xs_means,
-                        ys_means,
-                        yerr=ys_stds,
-                        color=col,
-                        alpha=0.3,
-                        linewidth=0.8,
-                        capsize=3,
-                        capthick=0.8,
-                        zorder=1,
-                    )
 
-            # Collect handle for legend (one per variant)
             if display_name not in labels_for_legend:
                 labels_for_legend.append(display_name)
                 handles_for_legend.append(line)
@@ -408,42 +399,27 @@ def plot_corruption_trends(
             ax.set_title("Modality Noise", pad=6, color="#1A1A1A")
             ax.set_xlabel("Relative Gaussian Noise Scale (σ_noise / σ_feature)")
             desired_ticks = [0.0, 0.15, 0.30, 0.45, 0.60, 0.75]
-        elif kind == "shuffle":
+        else:  # "shuffle"
             ax.set_title("Modality Shuffle", pad=6, color="#1A1A1A")
             ax.set_xlabel("Shuffle Probability")
             desired_ticks = [0.0, 0.15, 0.30, 0.45, 0.60, 0.75]
-        else:  # "rescale"
-            ax.set_title("Modality Rescale", pad=6, color="#1A1A1A")
-            ax.set_xlabel("Rescale Factor")
-            desired_ticks = [0.1, 0.5, 1.0, 2.0, 5.0, 10.0]
 
-        # Keep only ticks where we actually have data
         cp_vals = np.unique(df_corr["corruption_param"].values.astype(float))
         valid_ticks = [t for t in desired_ticks if np.any(np.isclose(cp_vals, t, atol=1e-8))]
 
         ax.set_xticks(valid_ticks)
-        # Format tick labels: two decimals for most, but for rescale use appropriate precision
-        if kind == "rescale":
-            ax.set_xticklabels([f"{t:.1f}" if t < 1.0 else f"{int(t) if t == int(t) else t:.1f}" for t in valid_ticks])
-        else:
-            ax.set_xticklabels([f"{t:.2f}" for t in valid_ticks])
+        ax.set_xticklabels([f"{t:.2f}" for t in valid_ticks])
 
-        # Grid & spines to match style
         ax.yaxis.grid(True, linestyle=":", linewidth=0.8, alpha=0.7, color="#BFC7D5")
         ax.xaxis.grid(False)
-
         for spine in ["top", "right"]:
             ax.spines[spine].set_visible(False)
         for spine in ["left", "bottom"]:
             ax.spines[spine].set_color("#A9B2C3")
 
-    # Shared Y label (left side of figure)
-    ylabel = f"Mean {metric_name.upper().replace('_', ' ')}"
-    if split_filter:
-        ylabel += f" ({split_filter.capitalize()})"
-    if head_filter:
-        ylabel += f" ({head_filter})"
-    
+    # Shared Y label
+    metric_display = format_metric_name(metric_name)
+    ylabel = f"Mean {metric_display}"
     fig.text(
         0.02,
         0.5,
@@ -453,7 +429,7 @@ def plot_corruption_trends(
         fontsize=11,
     )
 
-    # Shared legend (top center), no subtitle
+    # Shared legend
     if handles_for_legend and labels_for_legend:
         fig.legend(
             handles_for_legend,
@@ -467,21 +443,13 @@ def plot_corruption_trends(
             fontsize=9,
         )
 
-    # Layout
     plt.subplots_adjust(left=0.07, right=0.99, top=0.82, bottom=0.22, wspace=0.20)
 
-    suffix = "poly" if fit_line else "linear"
-    agg_suffix = aggregation_level
-    if split_filter:
-        agg_suffix += f"_{split_filter}"
-    if head_filter:
-        agg_suffix += f"_{head_filter}"
-    
     out_path_png = os.path.join(
-        output_dir, f"corruption_trends__{metric_name}__{agg_suffix}__{suffix}.png"
+        output_dir, f"corruption_trends__{metric_name}__reliability_switch.png"
     )
     out_path_pdf = os.path.join(
-        output_dir, f"corruption_trends__{metric_name}__{agg_suffix}__{suffix}.pdf"
+        output_dir, f"corruption_trends__{metric_name}__reliability_switch.pdf"
     )
     fig.savefig(out_path_png, bbox_inches="tight")
     fig.savefig(out_path_pdf, bbox_inches="tight")
@@ -494,25 +462,274 @@ def plot_corruption_trends(
         plt.close(fig)
 
 
-def main():
+def plot_noise_two_splits(
+    df_raw: pd.DataFrame,
+    output_dir: str,
+    metric_name: str = "f1_macro",
+    modality_filter: str = "random_single",
+    show: bool = False,
+) -> None:
+    """
+    Specialized visualization: Modality Noise only, with two panels:
+      - Left: individual split
+      - Right: group split
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Build per-fold aggregated F1 for each split separately
+    df_ind = build_per_fold_f1_df(
+        df_raw,
+        split_filter="individual",
+        modality_filter=modality_filter,
+        metric_name=metric_name,
+    )
+    df_grp = build_per_fold_f1_df(
+        df_raw,
+        split_filter="group",
+        modality_filter=modality_filter,
+        metric_name=metric_name,
+    )
+
+    # Filter down to noise corruption only
+    def _filter_noise(df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        df["corr_norm"] = (
+            df["corruption_type"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .str.replace("-", " ")
+            .str.replace("_", " ")
+        )
+        noise_mask = df["corr_norm"].str.contains("noise")
+        return df[noise_mask].copy()
+
+    df_ind = _filter_noise(df_ind)
+    df_grp = _filter_noise(df_grp)
+
+    if df_ind.empty and df_grp.empty:
+        print("No 'noise' corruption_type rows found for either split.")
+        return
+
+    # Figure layout: two panels side-by-side, independent y-limits.
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5), sharey=False)
+    fig.patch.set_facecolor("#FAFAFB")
+
+    # Build shared color map across both splits
+    all_variants = sorted(
+        set(df_ind["model_variant"].unique().tolist())
+        | set(df_grp["model_variant"].unique().tolist())
+    )
+    color_map: Dict[str, str] = {}
+    palette_index = 0
+    for mv in all_variants:
+        key = mv.lower()
+        if key in COLOR_OVERRIDES:
+            color_map[mv] = COLOR_OVERRIDES[key]
+        else:
+            color_map[mv] = PALETTE[palette_index % len(PALETTE)]
+            palette_index += 1
+
+    def _plot_one_split(ax, df_split: pd.DataFrame, split_name: str):
+        if df_split.empty:
+            ax.set_visible(False)
+            return [], []
+
+        ax.set_facecolor("#F4F6FA")
+        ax.set_axisbelow(True)
+
+        handles = []
+        labels = []
+
+        for mv, df_mv in df_split.groupby("model_variant"):
+            col = color_map[mv]
+
+            # Group by corruption_param to get mean/std over folds
+            grouped = df_mv.groupby("corruption_param")
+            xs = []
+            ys = []
+            ys_std = []
+            for cp, df_cp in grouped:
+                xs.append(float(cp))
+                ys.append(float(df_cp["value"].mean()))
+                ys_std.append(float(df_cp["value"].std(ddof=0)))
+            xs = np.asarray(xs, dtype=float)
+            ys = np.asarray(ys, dtype=float)
+            ys_std = np.asarray(ys_std, dtype=float)
+            if len(xs) == 0:
+                continue
+            order = np.argsort(xs)
+            xs = xs[order]
+            ys = ys[order]
+            ys_std = ys_std[order]
+
+            display_name = get_display_name(mv)
+            line = ax.plot(
+                xs,
+                ys,
+                color=col,
+                linestyle="-",
+                linewidth=2.0,
+                label=display_name,
+                zorder=3,
+            )[0]
+            ax.scatter(
+                xs,
+                ys,
+                color=col,
+                alpha=0.98,
+                s=55,
+                edgecolors="white",
+                linewidths=0.6,
+                zorder=4,
+            )
+            if np.any(ys_std > 0):
+                ax.errorbar(
+                    xs,
+                    ys,
+                    yerr=ys_std,
+                    fmt="none",
+                    marker=None,
+                    ecolor=col,
+                    alpha=0.4,
+                    linewidth=0.8,
+                    capsize=4,
+                    capthick=0.8,
+                    zorder=1,
+                )
+
+            if display_name not in labels:
+                labels.append(display_name)
+                handles.append(line)
+
+        # Axis styling
+        ax.set_title(
+            f"Modality Noise ({split_name.capitalize()})", pad=6, color="#1A1A1A"
+        )
+        ax.set_xlabel("Relative Gaussian Noise Scale (σ_noise / σ_feature)")
+
+        cp_vals = (
+            df_split["corruption_param"].astype(float).unique()
+            if not df_split.empty
+            else np.array([])
+        )
+        desired_ticks = [0.0, 0.15, 0.30, 0.45, 0.60, 0.75]
+        valid_ticks = [
+            t for t in desired_ticks if np.any(np.isclose(cp_vals, t, atol=1e-8))
+        ]
+        ax.set_xticks(valid_ticks)
+        ax.set_xticklabels([f"{t:.2f}" for t in valid_ticks])
+
+        # Y-axis: automatic per-panel limits + ticks
+        y_vals = df_split["value"].to_numpy(dtype=float)
+        y_vals = y_vals[np.isfinite(y_vals)]
+        if y_vals.size > 0:
+            y_min = float(y_vals.min())
+            y_max = float(y_vals.max())
+            data_range = y_max - y_min
+            margin = max(0.01, data_range * 0.05) if data_range > 0 else 0.02
+            lo = max(0.0, y_min - margin)
+            hi = min(1.0, y_max + margin)
+            if hi <= lo:
+                hi = lo + 0.10
+            ax.set_ylim(lo, hi)
+            yticks = np.linspace(lo, hi, 4)
+            ax.set_yticks(yticks)
+            ax.set_yticklabels([f"{t:.2f}" for t in yticks])
+
+        ax.yaxis.grid(True, linestyle=":", linewidth=0.8, alpha=0.7, color="#BFC7D5")
+        ax.xaxis.grid(False)
+        for spine in ["top", "right"]:
+            ax.spines[spine].set_visible(False)
+        for spine in ["left", "bottom"]:
+            ax.spines[spine].set_color("#A9B2C3")
+
+        return handles, labels
+
+    handles_all, labels_all = [], []
+    for ax, (split_df, split_name) in zip(
+        axes, [(df_ind, "individual"), (df_grp, "group")]
+    ):
+        h, l = _plot_one_split(ax, split_df, split_name)
+        handles_all.extend(h)
+        labels_all.extend(l)
+
+    # Shared Y label
+    metric_display = format_metric_name(metric_name)
+    ylabel = f"Mean {metric_display}"
+    fig.text(
+        0.02,
+        0.5,
+        ylabel,
+        va="center",
+        rotation="vertical",
+        fontsize=11,
+    )
+
+    # Shared legend
+    if handles_all and labels_all:
+        # Deduplicate by label
+        uniq_handles = []
+        uniq_labels = []
+        for h, lab in zip(handles_all, labels_all):
+            if lab not in uniq_labels:
+                uniq_labels.append(lab)
+                uniq_handles.append(h)
+        fig.legend(
+            uniq_handles,
+            uniq_labels,
+            loc="upper center",
+            ncol=min(len(uniq_labels), 5),
+            frameon=False,
+            bbox_to_anchor=(0.5, 1.03),
+            columnspacing=2.5,
+            handlelength=1.8,
+            fontsize=9,
+        )
+
+    plt.subplots_adjust(left=0.07, right=0.99, top=0.82, bottom=0.22, wspace=0.20)
+
+    out_path_png = os.path.join(
+        output_dir, f"corruption_trends__{metric_name}__noise_two_splits.png"
+    )
+    out_path_pdf = os.path.join(
+        output_dir, f"corruption_trends__{metric_name}__noise_two_splits.pdf"
+    )
+    fig.savefig(out_path_png, bbox_inches="tight")
+    fig.savefig(out_path_pdf, bbox_inches="tight")
+    print(f"Saved: {out_path_png}")
+    print(f"Saved: {out_path_pdf}")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+# ------------------------------------------------------------------
+# CLI
+# ------------------------------------------------------------------
+
+
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Plot corruption sweeps with per-fold points and either "
-            "quadratic trend lines or straight-line connections per model variant.\n"
-            "Produces a single figure with up to 4 horizontal subplots "
-            "(Modality Dropout, Modality Noise, Modality Shuffle, Modality Rescale)."
+            "Plot reliability-switch corruption sweeps with per-fold points and "
+            "straight-line connections per fusion variant.\n"
+            "Produces a figure with 3 horizontal subplots "
+            "(Modality Dropout, Modality Noise, Modality Shuffle)."
         )
     )
     parser.add_argument(
-        "--csv",
+        "--root-dir",
         type=str,
         required=True,
-        help="Path to the CSV file (with columns including metric,value/mean,fold,corruption_type).",
+        help="Root directory containing reliability results (e.g. resultsNEW or resultsNEW/kfold).",
     )
     parser.add_argument(
         "--outdir",
         type=str,
-        default="plots_corruptions",
+        default="plots_reliability_switch",
         help="Directory where plots will be saved.",
     )
     parser.add_argument(
@@ -520,24 +737,36 @@ def main():
         type=str,
         default=None,
         help=(
-            "Comma-separated list of model_variant names to include "
-            "(e.g. 'glrx,uniform_avg,gated_sum,pairwise,concat_mlp'). "
-            "If omitted, all variants present in the CSV are used."
+            "Comma-separated list of variant names to include "
+            "(e.g. 'glrx,uniform_avg,concat_mlp'). "
+            "If omitted, all variants present under root-dir are used."
         ),
     )
     parser.add_argument(
         "--metric",
         type=str,
         default="f1_macro",
-        help="Metric name to plot (default: f1_macro).",
+        help="Metric name to aggregate and plot (default: f1_macro).",
     )
     parser.add_argument(
-        "--fit-line",
+        "--split",
+        type=str,
+        choices=["individual", "group", "all"],
+        default="group",
+        help="Split to visualize: 'individual', 'group', or 'all' (averaged across both).",
+    )
+    parser.add_argument(
+        "--modality",
+        type=str,
+        default="random_single",
+        help="Modality filter for stress_tests.csv (default: random_single).",
+    )
+    parser.add_argument(
+        "--noise-only",
         action="store_true",
         help=(
-            "If set, fit a 2nd-order polynomial to the mean points per variant "
-            "and plot the smooth curve (no solid mean circles). "
-            "If not set, connect mean points with straight lines and show solid circles."
+            "If set, plot only Modality Noise as two panels "
+            "(individual split and group split) instead of all corruption types."
         ),
     )
     parser.add_argument(
@@ -545,55 +774,45 @@ def main():
         action="store_true",
         help="If set, display plots interactively.",
     )
-    parser.add_argument(
-        "--aggregation-level",
-        type=str,
-        default="per_fold",
-        choices=["per_fold", "aggregated"],
-        help=(
-            "Aggregation level: 'per_fold' uses per_fold CSV, "
-            "'aggregated' uses aggregated CSV."
-        ),
-    )
-    parser.add_argument(
-        "--split-filter",
-        type=str,
-        default=None,
-        help=(
-            "Filter by split type (e.g., 'individual', 'group'). "
-            "If None, shows all splits."
-        ),
-    )
-    parser.add_argument(
-        "--head-filter",
-        type=str,
-        default=None,
-        help=(
-            "Filter by specific head/construct name (e.g., 'Engagement', 'Synchrony'). "
-            "If None, shows all heads."
-        ),
-    )
 
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
 
     if args.variants is not None:
-        variants = [v.strip() for v in args.variants.split(",")]
+        variants = [v.strip() for v in args.variants.split(",") if v.strip()]
     else:
         variants = None
 
-    plot_corruption_trends(
-        csv_path=args.csv,
-        output_dir=args.outdir,
-        only_variants=variants,
-        metric_name=args.metric,
-        show=args.show,
-        fit_line=args.fit_line,
-        aggregation_level=args.aggregation_level,
-        split_filter=args.split_filter,
-        head_filter=args.head_filter,
-    )
+    raw = collect_stress_results(args.root_dir, variants=variants)
+
+    if args.noise_only:
+        plot_noise_two_splits(
+            raw,
+            output_dir=args.outdir,
+            metric_name=args.metric,
+            modality_filter=args.modality,
+            show=args.show,
+        )
+    else:
+        per_fold_df = build_per_fold_f1_df(
+            raw,
+            split_filter=args.split,
+            modality_filter=args.modality,
+            metric_name=args.metric,
+        )
+
+        plot_corruption_trends(
+            per_fold_df,
+            output_dir=args.outdir,
+            metric_name=args.metric,
+            show=args.show,
+        )
 
 
 if __name__ == "__main__":
     main()
+
 

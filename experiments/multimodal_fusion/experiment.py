@@ -13,11 +13,11 @@ import torch
 from torch.utils.data import DataLoader
 
 import models.builders as build
-from experiments.multimodal_fusion.allocation_tracker import run_allocation_tracking
 from experiments.ood_adaptation.finetuner import FineTuner
-from experiments.multimodal_reliability.config import ExperimentConfig
-from experiments.multimodal_reliability.model_utils import prepare_model
-from experiments.multimodal_reliability.stress import ReliabilityStressTester
+from experiments.multimodal_fusion.config import ExperimentConfig
+from experiments.multimodal_fusion.model_utils import prepare_model
+from experiments.multimodal_fusion.stress import ReliabilityStressTester
+from experiments.multimodal_fusion.allocation_tracker import run_allocation_tracking
 from train import (
     build_datasets,
     build_loaders,

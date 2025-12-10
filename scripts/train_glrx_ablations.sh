@@ -34,8 +34,6 @@ echo -e "${BLUE}================================================================
 CONFIGS=(
     "configs/EXPT_GLRX_uniform_avg.yaml"
     "configs/EXPT_GLRX_concat_mlp.yaml"
-    "configs/EXPT_GLRX_gated_sum.yaml"
-    "configs/EXPT_GLRX_pairwise.yaml"
 )
 
 # Variant names

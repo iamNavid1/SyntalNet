@@ -7,7 +7,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from engine.utils import modalities_to_branches
-from experiments.multimodal_reliability.corruptions import CORRUPTION_FUNCS
+from experiments.multimodal_fusion.corruptions import CORRUPTION_FUNCS
 from utils.metrics import compute_classification_metrics_from_logits
 
 
@@ -20,10 +20,63 @@ def _make_corruption_fn(
     def apply(z_list: List[torch.Tensor]) -> List[torch.Tensor]:
         if corruption_type not in CORRUPTION_FUNCS:
             raise KeyError(f"Unknown corruption type '{corruption_type}'")
-        func = CORRUPTION_FUNCS[corruption_type]
-        # All local corruption functions share the same interface:
-        #   func(z_list, strength, which_mod=None) -> List[Tensor]
-        return func(z_list, param, modality_idx)
+
+        # Per-modality corruption: simple wrapper around CORRUPTION_FUNCS
+        if modality_idx is not None:
+            func = CORRUPTION_FUNCS[corruption_type]
+            return func(z_list, param, modality_idx)
+
+        # "All" case: for each sample, randomly select exactly one modality to corrupt, others remain clean
+        M = len(z_list)
+        if M == 0 or param == 0.0:
+            return z_list
+
+        B = z_list[0].shape[0]
+        device = z_list[0].device
+        dtype = z_list[0].dtype
+
+        # Random modality choice per sample: (B,)
+        mod_choices = torch.randint(low=0, high=M, size=(B,), device=device)
+
+        out = [z.clone() for z in z_list]
+
+        for j in range(M):
+            mask = (mod_choices == j)
+            if not mask.any():
+                continue
+            z = out[j]
+
+            if corruption_type == "dropout":
+                # Zero out entire embedding for masked samples with prob=param
+                keep = (torch.rand_like(mask, dtype=dtype) > param)
+                effective_mask = mask & ~keep.bool()
+                if effective_mask.any():
+                    z[effective_mask] = 0.0
+
+            elif corruption_type == "noise":
+                sub = z[mask]
+                if sub.numel() == 0:
+                    continue
+                mean = sub.mean(dim=1, keepdim=True)
+                var = ((sub - mean) ** 2).mean(dim=1, keepdim=True)
+                std = var.clamp_min(1e-6).sqrt()
+                eps = torch.randn_like(sub, device=device, dtype=dtype)
+                z[mask] = sub + eps * std * float(param)
+
+            elif corruption_type == "shuffle":
+                # Shuffle only within the masked subset
+                idx = mask.nonzero(as_tuple=True)[0]
+                if idx.numel() <= 1:
+                    continue
+                perm = idx[torch.randperm(idx.numel(), device=device)]
+                z[idx] = z[perm]
+
+            elif corruption_type == "rescale":
+                z[mask] = z[mask] * float(param)
+
+            out[j] = z
+
+        return out
 
     return apply
 
@@ -96,35 +149,25 @@ class ReliabilityStressTester:
                 mod_name = (
                     self.branch_names[modality_idx]
                     if modality_idx is not None
-                    else "all"
+                    else "random_single"
                 )
                 if self.logger:
                     self.logger.info(
                         "Reusing clean baseline for %s param=%.3f (modality=%s)",
                         corr_type,
                         val,
-                        self.branch_names[modality_idx] if modality_idx is not None else "all",
+                        self.branch_names[modality_idx] if modality_idx is not None else "random_single",
                     )
             else:
-                # Decide which modality to corrupt for this sweep point
-                if modality_idx is None:
-                    # "all" case: randomly pick exactly ONE modality to corrupt
-                    eff_mod_idx = int(
-                        torch.randint(
-                            low=0,
-                            high=len(self.branch_names),
-                            size=(1,),
-                            device=self.device,
-                        ).item()
-                    )
-                else:
-                    eff_mod_idx = modality_idx
-
                 preds, targets = self._run_batches(
-                    _make_corruption_fn(corr_type, val, eff_mod_idx)
+                    _make_corruption_fn(corr_type, val, modality_idx)
                 )
                 metrics = self._compute_metrics(preds, targets)
-                mod_name = self.branch_names[eff_mod_idx]
+                mod_name = (
+                    self.branch_names[modality_idx]
+                    if modality_idx is not None
+                    else "random_single"
+                )
 
             for split, heads in metrics.items():
                 for head, head_metrics in heads.items():

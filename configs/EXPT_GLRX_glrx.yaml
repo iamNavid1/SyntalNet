@@ -1,49 +1,45 @@
-model:
-  name: SyntalNet
-  args:
-    ind_cls_heads: ["Engagement", "Lead"]
-    grp_cls_heads: ["Synchrony", "Confidence", "Transition"]
-    cls_head_type: "cosine"
-    proto_warmup_epochs: 3
-    mm_fusion_type: "glrx"
+base_config_path: "configs/SyntalNet.yaml"
+base_checkpoint_dir: "checkpoints/SyntalNet"
+base_checkpoint_name: "epoch_100.pth"
 
-dataset:
-  args:
-    root_dir: "./dataset"
-    modalities: ["face", "pose", "video", "turns", "utterance", "sentiment", "prosody", "audio",]
-  split:
-    mode: "kfold"  # "kfold", "logo", "item", "group"
-    n_folds: 5
-    seed: 17
-  stats_dir: "./configs/normalization_stats.yaml"
-  cls_count_dir: "./configs/class_counts.yaml"
+cv_mode: "kfold"
+n_folds: 5
+output_root: "experiments/multimodal_fusion_results"
+device: "cuda:0"
+
+fusion:
+  name: "glrx"
+  kwargs:
+    rank_pair: 16
+    alloc_hidden: 32
+    eps_floor: 0.03
+    p_drop: 0.1
+
+reliability:
+  p_corrupt: 0.7
+  dropout_range: [0.2, 0.5]
+  noise_range: [0.2, 0.5]
+  shuffle_range: [0.2, 0.5]
+  mix: {dropout: 0.4, noise: 0.4, shuffle: 0.2}
 
 training:
-  seed: 42
-  num_workers: 5
-  prefetch_factor: 4
-  epochs: 100
-  batch_size: 12
-  val_batch_size: 12
-  learning_rate: 3.e-4
-  min_lr: 1.e-5
-  warmup_ratio: 0.1
-  weight_decay: 0.002
-  scheduler: "cosine_decay"  # cosine_decay | one_cycle
-  grad_clip: 1.
-  accum_steps: 4
-  log_interval: 37
-  track_fusion_aux: True,
-  track_classifier_aux: True,
-  loss_type: "multiclass"
-  amp: False
-  cb_beta: 0.9995
-  focal_gamma: 2.
-  la_tau: 0.
-  label_smoothing: 0.01
-  val_interval: 10
-  ckpt_interval: 10
+  num_epochs: 20
+  learning_rate: null       # falls back to base config if null
+  weight_decay: null
+  grad_clip: 1.0
+  accum_steps: 1
+  scheduler: "reduce_on_plateau"
+  scheduler_factor: 0.5
+  scheduler_patience: 3
+  scheduler_threshold: 0.01
+  scheduler_min_lr: 1.0e-7
 
-logging:
-  log_dir: ./logs/SyntalNet
-  checkpoint_dir: ./checkpoints/SyntalNet
+stress:
+  corruption_grid:
+    dropout: [0.0, 0.15, 0.30, 0.45, 0.60, 0.75]
+    noise: [0.0, 0.15, 0.30, 0.45, 0.60, 0.75]
+    shuffle: [0.0, 0.15, 0.30, 0.45, 0.60, 0.75]
+  per_modality: false
+  run_allocation: false
+  allocation_noise_levels: [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+

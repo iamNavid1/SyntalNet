@@ -605,8 +605,6 @@ def visualize_ablation(
     })
     
     palette = ["#5B8FF9", "#61DDAA", "#65789B", "#F6BD16"]
-    # Box plot color: unified dark neutral color for all box plots
-    box_color = "#2C2C2C"  # Dark neutral gray
     
     # Geometry settings
     num_labels = len(labels)
@@ -635,12 +633,15 @@ def visualize_ablation(
             hi = min(1.0, lo + 0.20)
         return lo, hi
     
-    def build_boxplot_data(metric_name: str) -> Dict[Tuple[int, int], Dict[str, float]]:
+    def build_std_data(metric_name: str) -> np.ndarray:
         """
-        Build box plot data from all_metrics statistics.
-        Returns dict mapping (label_idx, variant_idx) to box plot stats.
+        Build std values array from all_metrics statistics.
+        Returns array of shape (n_labels, n_variants) with std values.
         """
-        box_data = {}
+        n_labels = len(LABEL_CONSTRUCTS)
+        n_variants = len(MODEL_ORDER)
+        std_data = np.zeros((n_labels, n_variants))
+        
         for var_idx, variant_key in enumerate(MODEL_ORDER):
             if variant_key not in all_metrics:
                 continue
@@ -652,82 +653,10 @@ def visualize_ablation(
                 label_metrics = variant_metrics[label_key]
                 if metric_name in label_metrics:
                     stat_values = label_metrics[metric_name]
-                    if isinstance(stat_values, dict):
-                        # Extract box plot statistics
-                        box_stats = {}
-                        for stat in ["min", "q1", "median", "q3", "max"]:
-                            if stat in stat_values:
-                                box_stats[stat] = stat_values[stat]
-                        if len(box_stats) >= 3:  # Need at least min, median, max
-                            box_data[(label_idx, var_idx)] = box_stats
-        return box_data
-    
-    def draw_boxplot(ax, x, box_stats, color, width_factor=0.6):
-        """
-        Draw a box plot at position x using the box statistics.
-        width_factor controls the width relative to bar_width.
-        """
-        if "min" not in box_stats or "max" not in box_stats:
-            return
+                    if isinstance(stat_values, dict) and "std" in stat_values:
+                        std_data[label_idx, var_idx] = stat_values["std"]
         
-        min_val = box_stats["min"]
-        max_val = box_stats["max"]
-        median_val = box_stats.get("median", (min_val + max_val) / 2)
-        q1_val = box_stats.get("q1", min_val)
-        q3_val = box_stats.get("q3", max_val)
-        
-        box_width = bar_width * width_factor
-        whisker_width = box_width * 0.3
-        
-        # Draw whiskers (min to max)
-        ax.plot([x, x], [min_val, max_val], color=color, linewidth=0.8, zorder=4, clip_on=False, alpha=0.33)
-        ax.plot(
-            [x - whisker_width/2, x + whisker_width/2],
-            [min_val, min_val],
-            color=color,
-            linewidth=0.8,
-            zorder=4,
-            clip_on=False,
-            alpha=0.33
-        )
-        ax.plot(
-            [x - whisker_width/2, x + whisker_width/2],
-            [max_val, max_val],
-            color=color,
-            linewidth=0.8,
-            zorder=4,
-            clip_on=False,
-            alpha=0.33
-        )
-
-        # Draw box (q1 to q3)
-        if "q1" in box_stats and "q3" in box_stats:
-            box_height = q3_val - q1_val
-            box_bottom = q1_val
-            # Draw box outline (no fill)
-            rect = Rectangle(
-                (x - box_width/2, box_bottom),
-                box_width,
-                box_height,
-                linewidth=0.8,
-                edgecolor=color,
-                facecolor='none',
-                zorder=4,
-                clip_on=False,
-                alpha=0.33
-            )
-            ax.add_patch(rect)
-
-        # Draw median line
-        ax.plot(
-            [x - box_width/2, x + box_width/2],
-            [median_val, median_val],
-            color=color,
-            linewidth=0.8,
-            zorder=5,
-            clip_on=False,
-            alpha=0.33
-        )
+        return std_data
     
     # Determine figure size based on number of metrics
     num_metrics = len(selected_metrics)
@@ -751,7 +680,7 @@ def visualize_ablation(
     else:
         fig, axes = plt.subplots(1, num_metrics, figsize=(fig_width, fig_height), sharey=False)
     fig.patch.set_facecolor('#FAFAFB')
-    custom_ylim = {"AUPRC": (0.40, 0.75)}
+    custom_ylim = {"AUPRC": (0.40, 0.70)}
     
     for ax, (metric_name, metric_matrix) in zip(axes, filtered_metrics_data.items()):
         y_lo, y_hi = custom_ylim.get(metric_name, compute_ylim(metric_matrix))
@@ -783,11 +712,26 @@ def visualize_ablation(
             )
             all_bars.append(bars)
         
-        # Box plots overlaid on bars
-        box_data = build_boxplot_data(metric_name)
-        for (label_idx, var_idx), box_stats in box_data.items():
-            x_pos = x_positions[label_idx, var_idx]
-            draw_boxplot(ax, x_pos, box_stats, box_color, width_factor=0.6)
+        # Error bars based on STD
+        std_data = build_std_data(metric_name)
+        for c in range(num_conditions):
+            # Get std values for this variant
+            std_values = std_data[:, c]
+            # Only draw error bars where we have valid std values
+            valid_mask = std_values > 0
+            if np.any(valid_mask):
+                ax.errorbar(
+                    x_positions[valid_mask, c],
+                    metric_matrix[valid_mask, c],
+                    yerr=std_values[valid_mask],
+                    fmt='none',  # Don't draw markers or lines, just error bars
+                    ecolor='#2C2C2C',
+                    elinewidth=1.0,
+                    capsize=3,
+                    capthick=1.0,
+                    zorder=4,
+                    alpha=0.7,
+                )
         
         if num_metrics > 1:
             ax.set_title(metric_name, pad=6, fontsize=13, weight='bold', color='#1A1A1A')
