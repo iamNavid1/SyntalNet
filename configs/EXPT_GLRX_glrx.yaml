@@ -24,6 +24,8 @@ reliability:
 
 training:
   num_epochs: 20
+  val_interval: 0
+  ckpt_interval: 10
   learning_rate: null       # falls back to base config if null
   weight_decay: null
   grad_clip: 1.0

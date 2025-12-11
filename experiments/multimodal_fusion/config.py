@@ -34,6 +34,7 @@ class TrainingSettings:
 
     num_epochs: int = 30
     val_interval: int = 0
+    ckpt_interval: int = 10
     learning_rate: Optional[float] = None
     weight_decay: Optional[float] = None
     grad_clip: Optional[float] = None
@@ -72,7 +73,7 @@ class ExperimentConfig:
     base_checkpoint_name: str = "epoch_100.pth"
     cv_mode: str = "kfold"
     n_folds: int = 5
-    output_root: str = "experiments/multimodal_reliability/resultsNEW"
+    output_root: str = "experiments/multimodal_fusion_results"
     device: str = "cuda:0"
     fusion: FusionVariantConfig = field(default_factory=FusionVariantConfig)
     reliability: ReliabilityAugmentationConfig = field(
@@ -96,8 +97,18 @@ class ExperimentConfig:
         fold_tag = f"fold_{fold_idx:02d}"
         return os.path.join(
             self.output_root,
-            self.cv_mode,
             variant_name.lower(),
+            self.cv_mode,
+            fold_tag,
+        )
+
+    def checkpoint_dir(self, variant_name: str, fold_idx: int) -> str:
+        """Directory to store checkpoints for a (variant, fold) pair."""
+        fold_tag = f"fold_{fold_idx:02d}"
+        return os.path.join(
+            "checkpoints",
+            f"EXPT_GLRX_{variant_name.lower()}",
+            self.cv_mode,
             fold_tag,
         )
 
@@ -132,14 +143,17 @@ def load_experiment_config(path: str) -> ExperimentConfig:
         cv_mode=raw.get("cv_mode", "kfold"),
         n_folds=int(raw.get("n_folds", 5)),
         output_root=raw.get(
-            "output_root", "experiments/multimodal_reliability/resultsNEW"
+            "output_root", "experiments/multimodal_fusion_results"
         ),
         device=raw.get("device", "cuda:0"),
         fusion=fusion,
         reliability=_build_dataclass(
             ReliabilityAugmentationConfig, raw.get("reliability")
         ),
-        training=_build_dataclass(TrainingSettings, raw.get("training")),
+        training=_build_dataclass(
+            TrainingSettings,
+            raw.get("training") or {},
+        ),
         stress=_build_dataclass(StressTestSettings, raw.get("stress")),
     )
     return cfg

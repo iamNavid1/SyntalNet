@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import glob
 import json
 import math
 import os
@@ -101,14 +102,15 @@ class ReliabilityExperimentRunner:
             )
 
         history = []
-        best_loss = float("inf")
-        best_path = os.path.join(resources.fold_dir, "checkpoints", "best.pth")
-        last_path = os.path.join(resources.fold_dir, "checkpoints", "last.pth")
+        ckpt_dir = self.cfg.checkpoint_dir(self.cfg.fusion.name, fold_idx)
+        os.makedirs(ckpt_dir, exist_ok=True)
+        ckpt_interval = self.cfg.training.ckpt_interval
 
         resources.logger.info(
-            "Training for %d epochs (val_interval=%d)",
+            "Training for %d epochs (val_interval=%d, ckpt_interval=%d)",
             self.cfg.training.num_epochs,
             self.cfg.training.val_interval,
+            ckpt_interval,
         )
         if self.cfg.training.val_interval <= 0:
             resources.logger.info(
@@ -160,19 +162,36 @@ class ReliabilityExperimentRunner:
                 "scheduler": scheduler.state_dict() if scheduler else None,
                 "val_loss": val_loss,
             }
-            torch.save(state, last_path)
 
-            if (val_loss is not None) and (val_loss < best_loss):
-                best_loss = val_loss
-                torch.save(state, best_path)
+            # Save checkpoint at intervals
+            epoch_num = epoch + 1
+            if epoch_num % ckpt_interval == 0 or epoch_num == self.cfg.training.num_epochs:
+                ckpt_path = os.path.join(ckpt_dir, f"epoch_{epoch_num}.pth")
+                torch.save(state, ckpt_path)
+                resources.logger.info("Saved checkpoint: %s", ckpt_path)
 
         fusion_wrapper.enable_corruption(False)
         if run_evaluation:
+            # Find the latest checkpoint for evaluation
+            final_epoch = self.cfg.training.num_epochs
+            ckpt_path = os.path.join(ckpt_dir, f"epoch_{final_epoch}.pth")
+            # If final epoch checkpoint doesn't exist, find the latest one
+            if not os.path.isfile(ckpt_path):
+                ckpt_files = glob.glob(os.path.join(ckpt_dir, "epoch_*.pth"))
+                if ckpt_files:
+                    # Sort by epoch number and get the latest
+                    ckpt_files.sort(key=lambda x: int(os.path.basename(x).split("_")[1].split(".")[0]))
+                    ckpt_path = ckpt_files[-1]
+                else:
+                    raise FileNotFoundError(
+                        f"No checkpoint found in {ckpt_dir} for fold {fold_idx}"
+                    )
             resources.logger.info(
-                "Finished training for fold %02d; evaluating last checkpoint",
+                "Finished training for fold %02d; evaluating checkpoint: %s",
                 resources.fold_idx,
+                ckpt_path,
             )
-            self._evaluate_fold(resources, last_path, history)
+            self._evaluate_fold(resources, ckpt_path, history)
         else:
             resources.logger.info(
                 "Finished training for fold %02d; skipping evaluation (train-only mode)",
@@ -186,17 +205,19 @@ class ReliabilityExperimentRunner:
             resources.fold_idx,
             self.cfg.fusion.name,
         )
-        last_path = os.path.join(resources.fold_dir, "checkpoints", "last.pth")
-        best_path = os.path.join(resources.fold_dir, "checkpoints", "best.pth")
-        if os.path.isfile(last_path):
-            ckpt_path = last_path
-        elif os.path.isfile(best_path):
-            ckpt_path = best_path
-        else:
+        ckpt_dir = self.cfg.checkpoint_dir(self.cfg.fusion.name, fold_idx)
+        
+        # Find the latest checkpoint
+        ckpt_files = glob.glob(os.path.join(ckpt_dir, "epoch_*.pth"))
+        if not ckpt_files:
             raise FileNotFoundError(
                 f"No trained checkpoint found for fold {fold_idx} "
-                f"(expected {last_path} or {best_path}). Run training first."
+                f"(expected checkpoints in {ckpt_dir}). Run training first."
             )
+        
+        # Sort by epoch number and get the latest
+        ckpt_files.sort(key=lambda x: int(os.path.basename(x).split("_")[1].split(".")[0]))
+        ckpt_path = ckpt_files[-1]
         resources.logger.info("Evaluating checkpoint: %s", ckpt_path)
         self._evaluate_fold(resources, ckpt_path, history=None)
 
@@ -205,9 +226,12 @@ class ReliabilityExperimentRunner:
         train_loader, val_loader = self._build_loaders(fold_idx)
         fold_dir = self.cfg.fold_output_dir(self.cfg.fusion.name, fold_idx)
         os.makedirs(fold_dir, exist_ok=True)
-        os.makedirs(os.path.join(fold_dir, "checkpoints"), exist_ok=True)
         os.makedirs(os.path.join(fold_dir, "logs"), exist_ok=True)
         os.makedirs(os.path.join(fold_dir, "results"), exist_ok=True)
+        
+        # Create checkpoint directory (separate from output directory)
+        ckpt_dir = self.cfg.checkpoint_dir(self.cfg.fusion.name, fold_idx)
+        os.makedirs(ckpt_dir, exist_ok=True)
 
         logger, writer = setup_logger(
             os.path.join(fold_dir, "logs"), name=f"reliability_fold_{fold_idx:02d}"
