@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from typing import Dict, List, Optional, Tuple
 
+from data.transforms import EMBEDDING_DIMS
 from engine.utils import BRANCH_MODALITY_MAP
 from models.base_model import BaseModel
 
@@ -21,6 +22,7 @@ class _MaskedTemporalCNN(nn.Module):
     def __init__(
         self,
         hidden_size: int,
+        in_channels: int,
         num_layers: int = 3,
         kernel_size: int = 3,
         dropout: float = 0.1,
@@ -31,9 +33,7 @@ class _MaskedTemporalCNN(nn.Module):
         self.kernel_size = kernel_size
         self.dropout = dropout
 
-        self.net: Optional[nn.Sequential] = None
-
-    def _build(self, in_channels: int, device: torch.device) -> None:
+        # Build network
         layers: List[nn.Module] = []
         c_in = in_channels
         for _ in range(self.num_layers):
@@ -51,7 +51,7 @@ class _MaskedTemporalCNN(nn.Module):
             if self.dropout > 0:
                 layers.append(nn.Dropout(self.dropout))
             c_in = self.hidden_size
-        self.net = nn.Sequential(*layers).to(device)
+        self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
         """
@@ -86,9 +86,6 @@ class _MaskedTemporalCNN(nn.Module):
         x = x.view(B * P, T, F)
         x = x.permute(0, 2, 1)  # (B*P, F, T)
 
-        if self.net is None:
-            self._build(in_channels=F, device=x.device)
-        assert self.net is not None
         x = self.net(x)
 
         if mask_1d is not None:
@@ -187,17 +184,25 @@ class TemporalCNN(BaseModel):
                 if mod is not None
             }
         )
-        self.sequence_encoders = nn.ModuleDict(
-            {
-                mod: _MaskedTemporalCNN(
-                    hidden_size=hidden_size,
-                    num_layers=num_cnn_layers,
-                    kernel_size=kernel_size,
-                    dropout=dropout,
-                )
-                for mod in modality_names
-            }
-        )
+        
+        # Build encoders
+        self.sequence_encoders = nn.ModuleDict()
+        for mod in modality_names:
+            # Determine input dimension for this modality
+            if mod in FEATURE_DIMS:
+                in_dim = FEATURE_DIMS[mod]
+            elif mod in EMBEDDING_DIMS:
+                in_dim = EMBEDDING_DIMS[mod]
+            else:
+                raise ValueError(f"Unknown modality '{mod}' - not in FEATURE_DIMS or EMBEDDING_DIMS")
+            
+            self.sequence_encoders[mod] = _MaskedTemporalCNN(
+                hidden_size=hidden_size,
+                in_channels=in_dim,
+                num_layers=num_cnn_layers,
+                kernel_size=kernel_size,
+                dropout=dropout,
+            )
 
         self.branch_projectors = nn.ModuleDict(
             {

@@ -20,11 +20,11 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 # Label constructs in display order
 CONSTRUCTS = [
-    {"name": "Engagement", "key": "individual_Engagement", "short": "Engagement"},
-    {"name": "Lead", "key": "individual_Lead", "short": "Lead"},
-    {"name": "Synchrony", "key": "group_Synchrony", "short": "Synchrony"},
-    {"name": "Confidence", "key": "group_Confidence", "short": "Confidence"},
-    {"name": "Transition", "key": "group_Transition", "short": "Transition"},
+    {"name": "Engagement", "key": "individual_Engagement", "short": "Individual\nEngagement"},
+    {"name": "Lead", "key": "individual_Lead", "short": "Individual\nLeadership"},
+    {"name": "Synchrony", "key": "group_Synchrony", "short": "Group\nSynchrony"},
+    {"name": "Confidence", "key": "group_Confidence", "short": "Group\nConfidence"},
+    {"name": "Transition", "key": "group_Transition", "short": "Interaction\nPhase"},
 ]
 
 # Data proportions for Experiment 1
@@ -337,11 +337,11 @@ def plot_experiment_1(ax, data: Dict):
                            elinewidth=1.0, capsize=2.5, capthick=1.0, zorder=4, alpha=0.7)
     
     # Styling
-    ax.set_ylabel("AUPRC (macro)", fontsize=11, color='#2C2C2C', weight='bold')
-    ax.set_title("Few-Shot Target-Group Adaptation: Varying Labeled Fraction", pad=10, fontsize=13, weight='bold', color='#1A1A1A')
-    ax.set_xlabel("Construct", fontsize=11, color='#2C2C2C', weight='bold')
+    ax.set_ylabel("AUPRC (macro)", fontsize=12, color='#2C2C2C', weight='bold')
+    ax.set_title("Few-Shot Target-Group Adaptation: Varying Labeled Fraction", pad=10, fontsize=15, weight='bold', color='#1A1A1A')
+    ax.set_xlabel("Construct", fontsize=12, color='#2C2C2C', weight='bold')
     ax.set_xticks(group_centers)
-    ax.set_xticklabels([c["short"] for c in CONSTRUCTS], fontsize=10, color='#2C2C2C')
+    ax.set_xticklabels([c["short"] for c in CONSTRUCTS], fontsize=12, color='#2C2C2C')
     ax.set_ylim(0.30, 0.55)
     ax.yaxis.grid(True, linestyle=':', linewidth=0.8, alpha=0.7, color='#BFC7D5', zorder=1)
     ax.spines['top'].set_visible(False)
@@ -388,11 +388,11 @@ def plot_experiment_2(ax, data: Dict):
                markeredgecolor='white', markeredgewidth=1.0, label=label, alpha=0.9, zorder=3)
     
     # Styling
-    ax.set_ylabel("AUPRC (macro)\n(averaged over constructs)", fontsize=11, color='#2C2C2C', weight='bold')
-    ax.set_xlabel("Epoch of adaptation on target group", fontsize=11, color='#2C2C2C', weight='bold')
-    ax.set_title("Effect of Adaptation Training Duration", pad=10, fontsize=13, weight='bold', color='#1A1A1A')
+    ax.set_ylabel("AUPRC (macro)\n(averaged over constructs)", fontsize=12, color='#2C2C2C', weight='bold')
+    ax.set_xlabel("Epoch of adaptation on target group", fontsize=12, color='#2C2C2C', weight='bold')
+    ax.set_title("Effect of Adaptation Training Duration", pad=10, fontsize=15, weight='bold', color='#1A1A1A')
     ax.set_xticks([0] + EXP2_EPOCHS)
-    ax.set_xticklabels(["0"] + [str(e) for e in EXP2_EPOCHS], fontsize=10, color='#2C2C2C')
+    ax.set_xticklabels(["0\n(Zero-shot)"] + [str(e) for e in EXP2_EPOCHS], fontsize=12, color='#2C2C2C')
     ax.set_ylim(0.35, 0.50)
     ax.yaxis.grid(True, linestyle=':', linewidth=0.8, alpha=0.7, color='#BFC7D5', zorder=1)
     ax.xaxis.grid(True, linestyle=':', linewidth=0.5, alpha=0.5, color='#E0E0E0', zorder=1)
@@ -450,11 +450,11 @@ def plot_experiment_3(ax, data: Dict):
                        elinewidth=1.0, capsize=3, capthick=1.0, zorder=4, alpha=0.7)
     
     # Styling
-    ax.set_ylabel("AUPRC (macro)", fontsize=11, color='#2C2C2C', weight='bold')
-    ax.set_title("Head-Only Adaptation with Frozen Encoder", pad=10, fontsize=13, weight='bold', color='#1A1A1A')
-    ax.set_xlabel("Construct", fontsize=11, color='#2C2C2C', weight='bold')
+    ax.set_ylabel("AUPRC (macro)", fontsize=12, color='#2C2C2C', weight='bold')
+    ax.set_title("Head-Only Adaptation with Frozen Encoder", pad=10, fontsize=15, weight='bold', color='#1A1A1A')
+    ax.set_xlabel("Construct", fontsize=12, color='#2C2C2C', weight='bold')
     ax.set_xticks(group_centers)
-    ax.set_xticklabels([c["short"] for c in CONSTRUCTS], fontsize=10, color='#2C2C2C')
+    ax.set_xticklabels([c["short"] for c in CONSTRUCTS], fontsize=12, color='#2C2C2C')
     ax.set_ylim(0.30, 0.70)
     ax.yaxis.grid(True, linestyle=':', linewidth=0.8, alpha=0.7, color='#BFC7D5', zorder=1)
     ax.spines['top'].set_visible(False)
@@ -489,8 +489,8 @@ def create_visualization(
     # Style settings
     plt.rcParams.update({
         "font.family": "DejaVu Sans",
-        "font.size": 11,
-        "axes.titlesize": 13,
+        "font.size": 12,
+        "axes.titlesize": 14,
         "axes.labelsize": 11,
         "axes.titleweight": "bold",
         "xtick.labelsize": 10,
@@ -519,10 +519,10 @@ def create_visualization(
         labels_exp1.append(label)
     
     axes[0].legend(handles_exp1, labels_exp1, loc='upper left', frameon=False, 
-                  fontsize=9, ncol=3, columnspacing=1.2)
+                  fontsize=11, ncol=2, columnspacing=1.2)
     
     # Legend for Experiment 2
-    axes[1].legend(loc='upper left', frameon=False, fontsize=9, ncol=2)
+    axes[1].legend(loc='upper left', frameon=False, fontsize=11, ncol=2)
     
     # Legend for Experiment 3
     from matplotlib.patches import Patch
@@ -531,7 +531,7 @@ def create_visualization(
         Patch(facecolor="#E8684A", edgecolor='none')
     ]
     labels_exp3 = ["Zero-shot", "Head-only adaptation (80% target labels)"]
-    axes[2].legend(handles_exp3, labels_exp3, loc='upper left', frameon=False, fontsize=9)
+    axes[2].legend(handles_exp3, labels_exp3, loc='upper left', frameon=False, fontsize=11)
     
     plt.subplots_adjust(left=0.04, right=0.995, top=0.90, bottom=0.12, wspace=0.25)
     

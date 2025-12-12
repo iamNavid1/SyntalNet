@@ -21,6 +21,7 @@ from typing import Optional, List, Dict
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MultipleLocator, FormatStrFormatter
 
 
 # ------------------------------------------------------------------
@@ -28,8 +29,8 @@ import matplotlib.pyplot as plt
 # ------------------------------------------------------------------
 plt.rcParams.update({
     "font.family": "DejaVu Sans",
-    "font.size": 11,
-    "axes.titlesize": 13,
+    "font.size": 10,
+    "axes.titlesize": 11,
     "axes.labelsize": 11,
     "axes.titleweight": "bold",
     "xtick.labelsize": 10,
@@ -86,49 +87,81 @@ def collect_stress_results(
     """
     Load and concatenate per-fold stress_tests.csv for all variants.
 
-    Expected layout:
+    Expected layout (variant-first):
       root_dir/
-        <cv_mode>/          e.g. kfold
-          <variant>/
+        <variant>/
+          <cv_mode>/          e.g. kfold, logo
             fold_00/results/stress_tests.csv
             fold_01/results/stress_tests.csv
             ...
+
+    Also supported: passing a single variant directory as root_dir:
+      root_dir/
+        <cv_mode>/
+          fold_00/results/stress_tests.csv
+          ...
     """
     root = Path(root_dir).resolve()
 
-    # Allow passing root at results root or cv_mode level
-    cv_dirs: List[Path] = []
-    if any(p.is_dir() and p.name in {"kfold", "logo"} for p in root.iterdir()):
-        for p in root.iterdir():
-            if p.is_dir() and p.name in {"kfold", "logo"}:
-                cv_dirs.append(p)
-    else:
-        cv_dirs.append(root)
-
     records: List[pd.DataFrame] = []
 
-    for cv_dir in cv_dirs:
-        for variant_dir in cv_dir.iterdir():
-            if not variant_dir.is_dir():
+    def _read_one(csv_path: Path, variant_name: str, fold_name: str, cv_mode: Optional[str]) -> None:
+        df = pd.read_csv(csv_path)
+        df["variant"] = variant_name
+        df["fold"] = fold_name
+        # Keep cv_mode around for debugging / filtering if needed downstream (harmless extra column).
+        if cv_mode is not None:
+            df["cv_mode"] = cv_mode
+        records.append(df)
+
+    def _iter_folds_under(cv_dir: Path, variant_name: str, cv_mode: Optional[str]) -> None:
+        if not cv_dir.is_dir():
+            return
+        for fold_dir in cv_dir.iterdir():
+            if not fold_dir.is_dir() or not fold_dir.name.startswith("fold_"):
                 continue
+            csv_path = fold_dir / "results" / "stress_tests.csv"
+            if csv_path.is_file():
+                _read_one(csv_path, variant_name=variant_name, fold_name=fold_dir.name, cv_mode=cv_mode)
+
+    cv_names = {"kfold", "logo"}
+
+    root_subdirs = [p for p in root.iterdir() if p.is_dir()]
+
+    # Case A: root is results root containing variants: root/<variant>/<cv_mode>/...
+    root_looks_like_variant_root = any(
+        any((sd / cv).is_dir() for cv in cv_names)
+        for sd in root_subdirs
+    )
+    if root_looks_like_variant_root:
+        for variant_dir in root_subdirs:
             variant_name = variant_dir.name
             if variants is not None and variant_name not in variants:
                 continue
-
-            for fold_dir in variant_dir.iterdir():
-                if not fold_dir.is_dir() or not fold_dir.name.startswith("fold_"):
+            for cv_dir in variant_dir.iterdir():
+                if not cv_dir.is_dir():
                     continue
-                results_dir = fold_dir / "results"
-                csv_path = results_dir / "stress_tests.csv"
-                if not csv_path.is_file():
+                _iter_folds_under(cv_dir, variant_name=variant_name, cv_mode=cv_dir.name)
+    else:
+        # Case B: root points at a single variant directory: root/<cv_mode>/...
+        root_has_cv_dirs = any(p.is_dir() and p.name in cv_names for p in root_subdirs)
+        if root_has_cv_dirs:
+            if variants is not None and root.name not in variants:
+                raise FileNotFoundError(
+                    f"root-dir appears to be a single-variant folder ('{root.name}'), "
+                    f"but it is not in --variants={variants}."
+                )
+            for cv_dir in root_subdirs:
+                if not cv_dir.is_dir():
                     continue
-                df = pd.read_csv(csv_path)
-                df["variant"] = variant_name
-                df["fold"] = fold_dir.name
-                records.append(df)
+                _iter_folds_under(cv_dir, variant_name=root.name, cv_mode=cv_dir.name)
 
     if not records:
-        raise FileNotFoundError(f"No stress_tests.csv found under {root_dir}")
+        raise FileNotFoundError(
+            "No stress_tests.csv found under root-dir. Expected one of:\n"
+            f"  - {root_dir}/<variant>/<cv_mode>/fold_*/results/stress_tests.csv\n"
+            f"  - {root_dir}/<cv_mode>/fold_*/results/stress_tests.csv  (if root-dir is a single variant)\n"
+        )
 
     all_df = pd.concat(records, ignore_index=True)
     return all_df
@@ -288,7 +321,7 @@ def plot_corruption_trends(
     fig, axes = plt.subplots(
         1,
         n_panels,
-        figsize=(20, 3.6) if n_panels == 3 else (16, 3.6),
+        figsize=(13, 3.6) if n_panels == 3 else (9, 3.6),
         sharey=False,
     )
     if n_panels == 1:
@@ -393,15 +426,15 @@ def plot_corruption_trends(
         # Titles and x-axis labels per panel
         if kind == "dropout":
             ax.set_title("Modality Dropout", pad=6, color="#1A1A1A")
-            ax.set_xlabel("Dropout Probability")
+            ax.set_xlabel("Dropout Probability", fontsize=10)
             desired_ticks = [0.0, 0.15, 0.30, 0.45, 0.60, 0.75]
         elif kind == "noise":
             ax.set_title("Modality Noise", pad=6, color="#1A1A1A")
-            ax.set_xlabel("Relative Gaussian Noise Scale (σ_noise / σ_feature)")
+            ax.set_xlabel("Relative Gaussian Noise Scale (σ_noise / σ_feature)", fontsize=10)
             desired_ticks = [0.0, 0.15, 0.30, 0.45, 0.60, 0.75]
         else:  # "shuffle"
             ax.set_title("Modality Shuffle", pad=6, color="#1A1A1A")
-            ax.set_xlabel("Shuffle Probability")
+            ax.set_xlabel("Shuffle Probability", fontsize=10)
             desired_ticks = [0.0, 0.15, 0.30, 0.45, 0.60, 0.75]
 
         cp_vals = np.unique(df_corr["corruption_param"].values.astype(float))
@@ -417,16 +450,21 @@ def plot_corruption_trends(
         for spine in ["left", "bottom"]:
             ax.spines[spine].set_color("#A9B2C3")
 
+        # Y-axis ticks at every 0.01 (as requested)
+        ax.yaxis.set_major_locator(MultipleLocator(0.01))
+        ax.yaxis.set_major_formatter(FormatStrFormatter("%.2f"))
+
     # Shared Y label
     metric_display = format_metric_name(metric_name)
-    ylabel = f"Mean {metric_display}"
+    ylabel = f"{metric_display} (macro)\n(averaged over constructs)"
     fig.text(
-        0.02,
+        0.015,
         0.5,
         ylabel,
         va="center",
+        ha="center",
         rotation="vertical",
-        fontsize=11,
+        fontsize=10,
     )
 
     # Shared legend
@@ -440,7 +478,7 @@ def plot_corruption_trends(
             bbox_to_anchor=(0.5, 1.03),
             columnspacing=2.5,
             handlelength=1.8,
-            fontsize=9,
+            prop={'weight': 'bold', 'size': 11},
         )
 
     plt.subplots_adjust(left=0.07, right=0.99, top=0.82, bottom=0.22, wspace=0.20)
@@ -512,7 +550,7 @@ def plot_noise_two_splits(
         return
 
     # Figure layout: two panels side-by-side, independent y-limits.
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5), sharey=False)
+    fig, axes = plt.subplots(1, 2, figsize=(9, 3.6), sharey=False)
     fig.patch.set_facecolor("#FAFAFB")
 
     # Build shared color map across both splits
@@ -606,7 +644,7 @@ def plot_noise_two_splits(
         ax.set_title(
             f"Modality Noise ({split_name.capitalize()})", pad=6, color="#1A1A1A"
         )
-        ax.set_xlabel("Relative Gaussian Noise Scale (σ_noise / σ_feature)")
+        ax.set_xlabel("Relative Gaussian Noise Scale (σ_noise / σ_feature)", fontsize=10)
 
         cp_vals = (
             df_split["corruption_param"].astype(float).unique()
@@ -633,9 +671,10 @@ def plot_noise_two_splits(
             if hi <= lo:
                 hi = lo + 0.10
             ax.set_ylim(lo, hi)
-            yticks = np.linspace(lo, hi, 4)
-            ax.set_yticks(yticks)
-            ax.set_yticklabels([f"{t:.2f}" for t in yticks])
+
+        # Y-axis ticks at every 0.01 (as requested)
+        ax.yaxis.set_major_locator(MultipleLocator(0.01))
+        ax.yaxis.set_major_formatter(FormatStrFormatter("%.2f"))
 
         ax.yaxis.grid(True, linestyle=":", linewidth=0.8, alpha=0.7, color="#BFC7D5")
         ax.xaxis.grid(False)
@@ -656,14 +695,15 @@ def plot_noise_two_splits(
 
     # Shared Y label
     metric_display = format_metric_name(metric_name)
-    ylabel = f"Mean {metric_display}"
+    ylabel = f"{metric_display} (macro)\n(averaged over constructs)"
     fig.text(
-        0.02,
+        0.001,
         0.5,
         ylabel,
         va="center",
+        ha="center",
         rotation="vertical",
-        fontsize=11,
+        fontsize=10,
     )
 
     # Shared legend
@@ -681,10 +721,10 @@ def plot_noise_two_splits(
             loc="upper center",
             ncol=min(len(uniq_labels), 5),
             frameon=False,
-            bbox_to_anchor=(0.5, 1.03),
+            bbox_to_anchor=(0.5, 0.97),
             columnspacing=2.5,
             handlelength=1.8,
-            fontsize=9,
+            prop={'weight': 'bold', 'size': 11},
         )
 
     plt.subplots_adjust(left=0.07, right=0.99, top=0.82, bottom=0.22, wspace=0.20)

@@ -1,7 +1,7 @@
 model:
   name: TemporalBiLSTM
   args:
-    hidden_size: 128
+    hidden_size: 64
     num_lstm_layers: 2
     dropout: 0.2
     bidirectional: True

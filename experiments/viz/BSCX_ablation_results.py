@@ -52,9 +52,9 @@ import matplotlib.pyplot as plt
 # ------------------------------------------------------------------
 plt.rcParams.update({
     "font.family": "DejaVu Sans",
-    "font.size": 11,
-    "axes.titlesize": 13,
-    "axes.labelsize": 11,
+    "font.size": 12,
+    "axes.titlesize": 14,
+    "axes.labelsize": 12,
     "axes.titleweight": "bold",
     "xtick.labelsize": 10,
     "ytick.labelsize": 10,
@@ -471,20 +471,29 @@ def plot_corruption_trends(
         for spine in ["left", "bottom"]:
             ax.spines[spine].set_color("#A9B2C3")
 
-    # Shared Y label (left side of figure)
-    ylabel = f"Mean {metric_name.upper().replace('_', ' ').replace('MACRO', '')}"
+    # Shared Y label
+    ylabel = f"{metric_name.upper().replace('_', ' ').replace('MACRO', '')} (macro)"
     if split_filter:
-        ylabel += f" ({split_filter.capitalize()})"
+        if split_filter == "all":
+            ylabel += f"\n(averaged over constructs)"
+        else:
+            ylabel += f" ({split_filter.capitalize()})"
     if head_filter:
         ylabel += f" ({head_filter})"
-    
+
+    if split_filter == "all":
+        x = 0.015
+    else:
+        x = 0.02
+
     fig.text(
-        0.02,
+        x,
         0.5,
         ylabel,
         va="center",
+        ha="center",
         rotation="vertical",
-        fontsize=11,
+        fontsize=12,
     )
 
     # Shared legend (top center), no subtitle
@@ -498,7 +507,7 @@ def plot_corruption_trends(
             bbox_to_anchor=(0.5, 1.03),
             columnspacing=2.5,
             handlelength=1.8,
-            fontsize=9,
+            prop={'weight': 'bold', 'size': 12},
         )
 
     # Layout

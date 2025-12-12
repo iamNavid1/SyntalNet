@@ -61,11 +61,11 @@ MODEL_ORDER = [
 
 # Label constructs in display order
 LABEL_CONSTRUCTS = [
-    {"name": "Group\nConfidence", "key": "Confidence", "type": "group"},
-    {"name": "Group\nSynchrony", "key": "Synchrony", "type": "group"},
-    {"name": "Group\nTransition", "key": "Transition", "type": "group"},
     {"name": "Individual\nEngagement", "key": "Engagement", "type": "individual"},
-    {"name": "Individual\nLead", "key": "Lead", "type": "individual"},
+    {"name": "Individual\nLeadership", "key": "Lead", "type": "individual"},
+    {"name": "Group\nSynchrony", "key": "Synchrony", "type": "group"},
+    {"name": "Group\nConfidence", "key": "Confidence", "type": "group"},
+    {"name": "Interaction\nPhase", "key": "Transition", "type": "group"},
 ]
 
 # Metrics to extract
@@ -593,7 +593,7 @@ def visualize_ablation(
     # Style settings
     plt.rcParams.update({
         "font.family": "DejaVu Sans",
-        "font.size": 11,
+        "font.size": 12,
         "axes.titlesize": 14,
         "axes.labelsize": 11,
         "axes.titleweight": "bold",
@@ -735,12 +735,14 @@ def visualize_ablation(
         
         if num_metrics > 1:
             ax.set_title(metric_name, pad=6, fontsize=13, weight='bold', color='#1A1A1A')
+            xtick_size = 10
         else:
-            ax.set_ylabel(metric_name, fontsize=10, color='#2C2C2C')
+            ax.set_ylabel(metric_name, fontsize=12, weight='bold', color='#2C2C2C')
+            xtick_size = 11
         
         ax.set_ylim(y_lo, y_hi)
         ax.set_xticks(group_centers)
-        ax.set_xticklabels(labels, ha="center", fontsize=10, color='#2C2C2C')
+        ax.set_xticklabels(labels, ha="center", fontsize=xtick_size, color='#2C2C2C')
         ax.yaxis.grid(True, linestyle=':', linewidth=0.8, alpha=0.7, color='#BFC7D5', zorder=1)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
@@ -765,7 +767,8 @@ def visualize_ablation(
         frameon=False,
         bbox_to_anchor=(0.5, bbox_y),
         columnspacing=2.8,
-        handlelength=1.8
+        handlelength=1.8,
+        prop={'weight': 'bold'}
     )
     
     plt.subplots_adjust(left=0.04, right=0.995, top=0.86, bottom=0.22, wspace=0.2)

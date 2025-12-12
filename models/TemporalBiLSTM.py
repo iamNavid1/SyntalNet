@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from typing import Dict, List, Optional, Tuple
 
+from data.transforms import EMBEDDING_DIMS
 from engine.utils import BRANCH_MODALITY_MAP
 from models.base_model import BaseModel
 
@@ -21,6 +22,7 @@ class _MaskedTemporalLSTM(nn.Module):
     def __init__(
         self,
         hidden_size: int,
+        input_dim: int,
         num_layers: int = 2,
         dropout: float = 0.1,
         bidirectional: bool = True,
@@ -31,26 +33,26 @@ class _MaskedTemporalLSTM(nn.Module):
         self.dropout = dropout
         self.bidirectional = bidirectional
 
-        self.lstm: Optional[nn.LSTM] = None
-        self.out_proj: Optional[nn.Sequential] = None
-
-    def _maybe_build(self, input_dim: int, device: torch.device) -> None:
-        if self.lstm is None:
-            self.lstm = nn.LSTM(
-                input_size=input_dim,
-                hidden_size=self.hidden_size,
-                num_layers=self.num_layers,
-                dropout=self.dropout if self.num_layers > 1 else 0.0,
-                batch_first=True,
-                bidirectional=self.bidirectional,
-            )
-            self.lstm.to(device)
-        if self.out_proj is None:
-            out_dim = self.hidden_size * (2 if self.bidirectional else 1)
-            layers: List[nn.Module] = [nn.LayerNorm(out_dim), nn.Linear(out_dim, self.hidden_size), nn.ReLU(inplace=True)]
-            if self.dropout > 0:
-                layers.append(nn.Dropout(self.dropout))
-            self.out_proj = nn.Sequential(*layers).to(device)
+        # Build LSTM
+        self.lstm = nn.LSTM(
+            input_size=input_dim,
+            hidden_size=self.hidden_size,
+            num_layers=self.num_layers,
+            dropout=self.dropout if self.num_layers > 1 else 0.0,
+            batch_first=True,
+            bidirectional=self.bidirectional,
+        )
+        
+        # Build output projection
+        out_dim = self.hidden_size * (2 if self.bidirectional else 1)
+        layers: List[nn.Module] = [
+            nn.LayerNorm(out_dim),
+            nn.Linear(out_dim, self.hidden_size),
+            nn.ReLU(inplace=True)
+        ]
+        if self.dropout > 0:
+            layers.append(nn.Dropout(self.dropout))
+        self.out_proj = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor]) -> torch.Tensor:
         """
@@ -86,9 +88,6 @@ class _MaskedTemporalLSTM(nn.Module):
             mask_lengths = mask.view(B * P, T).sum(dim=-1)
             lengths = mask_lengths.to(dtype=torch.long)
         lengths = lengths.clamp_min(1)
-
-        self._maybe_build(F, device)
-        assert self.lstm is not None and self.out_proj is not None
 
         packed = nn.utils.rnn.pack_padded_sequence(
             x.view(B * P, T, F),
@@ -190,17 +189,25 @@ class TemporalBiLSTM(BaseModel):
                 if mod is not None
             }
         )
-        self.sequence_encoders = nn.ModuleDict(
-            {
-                mod: _MaskedTemporalLSTM(
-                    hidden_size=hidden_size,
-                    num_layers=num_lstm_layers,
-                    dropout=dropout,
-                    bidirectional=bidirectional,
-                )
-                for mod in modality_names
-            }
-        )
+        
+        # Build encoders
+        self.sequence_encoders = nn.ModuleDict()
+        for mod in modality_names:
+            # Determine input dimension for this modality
+            if mod in FEATURE_DIMS:
+                in_dim = FEATURE_DIMS[mod]
+            elif mod in EMBEDDING_DIMS:
+                in_dim = EMBEDDING_DIMS[mod]
+            else:
+                raise ValueError(f"Unknown modality '{mod}' - not in FEATURE_DIMS or EMBEDDING_DIMS")
+            
+            self.sequence_encoders[mod] = _MaskedTemporalLSTM(
+                hidden_size=hidden_size,
+                input_dim=in_dim,
+                num_layers=num_lstm_layers,
+                dropout=dropout,
+                bidirectional=bidirectional,
+            )
 
         self.branch_projectors = nn.ModuleDict(
             {
