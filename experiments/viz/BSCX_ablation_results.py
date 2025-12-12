@@ -5,37 +5,11 @@ This script visualizes stress test results from multichannel_fusion/runner.py.
 
 Usage Examples:
 
-1. All-constructs aggregated (group split):
-   python experiments/viz/BSCX_ablation_results.py \
-       --csv experiments/multichannel_fusion_results/stress_test_results_all_constructs.csv \
-       --aggregation-level all_constructs \
-       --split-filter group \
-       --outdir experiments/viz_results/bscx
-
-2. All-constructs aggregated (individual split):
-   python experiments/viz/BSCX_ablation_results.py \
-       --csv experiments/multichannel_fusion_results/stress_test_results_all_constructs.csv \
-       --aggregation-level all_constructs \
-       --split-filter individual \
-       --outdir experiments/viz_results/bscx
-
-3. All-constructs aggregated (all splits combined):
+All-constructs aggregated (all splits combined):
    python experiments/viz/BSCX_ablation_results.py \
        --csv experiments/multichannel_fusion_results/stress_test_results_all_constructs.csv \
        --aggregation-level all_constructs \
        --split-filter all \
-       --outdir experiments/viz_results/bscx
-
-4. Per-construct aggregated:
-   python experiments/viz/BSCX_ablation_results.py \
-       --csv experiments/multichannel_fusion_results/stress_test_results_per_construct.csv \
-       --aggregation-level per_construct \
-       --outdir experiments/viz_results/bscx
-
-5. Per-fold visualization:
-   python experiments/viz/BSCX_ablation_results.py \
-       --csv experiments/multichannel_fusion_results/stress_test_results_per_fold.csv \
-       --aggregation-level per_fold \
        --outdir experiments/viz_results/bscx
 """
 
@@ -43,7 +17,7 @@ import os
 import argparse
 from typing import Optional, List, Dict
 
-import numpy as np
+import numpy as npsss
 import pandas as pd
 import matplotlib.pyplot as plt
 
